@@ -5,6 +5,7 @@ import { generateMatchSheetHtml } from '../services/emailService'; // Assuming y
 import { generateBulkMissionOrdersPDF, generateMissionOrderPDF } from '../services/pdfService'; // Assuming you extract this
 import { Match, Official, Location } from '../types';
 import { blobToBase64 } from '../utils/fileHelpers';
+import { logAndThrow } from '../utils/logging';
 
 
 export function useSendMatchSheet() {
@@ -69,9 +70,7 @@ export function useSendMatchSheet() {
                 }
             );
 
-            if (functionError) {
-                throw new Error(functionError.message);
-            }
+            if (functionError) return logAndThrow('send-email (bulk match sheet)', functionError, { matchId: match.id, recipientCount: emails.length });
 
             // Step 6: Update the match's status in the database upon successful email sending
             const { data: updatedMatch, error: dbError } = await supabase
@@ -85,9 +84,7 @@ export function useSendMatchSheet() {
                 .select()
                 .single();
 
-            if (dbError) {
-                throw new Error(dbError.message);
-            }
+            if (dbError) return logAndThrow('update match after send-email', dbError, { matchId: match.id });
 
             return updatedMatch;
         },
@@ -133,8 +130,7 @@ export function useSendIndividualMissionOrder() {
                     },
                 }
             );
-
-            if (emailError) throw emailError;
+            if (emailError) return logAndThrow('send-email (individual mission order)', emailError, { matchId: match.id, officialId: official.id });
 
             // Optionally, log this action to your audit log here if you have a hook for it
             return { success: true, officialName: official.fullName };

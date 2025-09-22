@@ -1392,7 +1392,7 @@ const Dashboard: React.FC<DashboardProps> = (props) => {
   );
 
   const [appliedFilters, setAppliedFilters] = useState<Filters>(initialFilters);
-  const [activeView, setActiveView] = useState<ActiveView>({ type: "all" });
+  const [activeView, setActiveView] = useState<ActiveView>({ type: "week" });
   const [expandedLeaguesNav, setExpandedLeaguesNav] = useState<
     Record<string, boolean>
   >({});

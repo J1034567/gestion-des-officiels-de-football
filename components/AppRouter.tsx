@@ -70,7 +70,18 @@ import {
 } from "../hooks/useCommunication";
 import { useQueryClient, useMutation } from "@tanstack/react-query";
 import { supabase } from "../lib/supabaseClient";
-import { logAudit } from "../lib/audit";
+import { logAndThrow, logWarning } from "../utils/logging";
+import { generateTemplate } from "../services/exportService";
+import { generateMissionOrderPDF, downloadBlob } from "../services/pdfService";
+import {
+  generateOfficialsCsv,
+  generateMatchesCsv,
+  generateStadiumsCsv,
+  generateAvailabilityCsv,
+  generateForbiddenCsv,
+  downloadOptimizationDataAsZip,
+} from "../services/optimizationService";
+// audit logging is handled by DB triggers; no client logging here
 
 // A simple protected route component
 const ProtectedRoute = ({
@@ -95,6 +106,7 @@ export const AppRouter = () => {
 
   const [currentSeason, setCurrentSeason] = useState<string>("");
   const [currentLeagueId, setCurrentLeagueId] = useState<string>("all");
+  const [settingsDirty, setSettingsDirty] = useState<boolean>(false);
 
   useEffect(() => {
     if (settings?.seasons && settings.seasons.length > 0) {
@@ -119,10 +131,12 @@ export const AppRouter = () => {
     season: currentSeason,
   });
   const { data: teamsData, isLoading: teamsLoading } = useTeams({
-    pagination: { page: 1, pageSize: 1000 },
+    pagination: { page: 1, pageSize: 2000 },
+    filters: { includeArchived: true },
   });
   const { data: officialsData, isLoading: officialsLoading } = useOfficials({
-    pagination: { page: 1, pageSize: 1000 },
+    pagination: { page: 1, pageSize: 2000 },
+    filters: { includeArchived: true },
   });
   const { data: matchesData, isLoading: matchesLoading } = useMatches({
     filters: {
@@ -133,10 +147,11 @@ export const AppRouter = () => {
   });
   const { data: stadiumsData, isLoading: stadiumsLoading } = useStadiums({
     pagination: { page: 1, pageSize: 2000 },
+    filters: { includeArchived: true },
   });
   const { data: users, isLoading: usersLoading } = useUsers();
   const { data: auditLogsData, isLoading: auditLogsLoading } = useAuditLogs({
-    pagination: { page: 1, pageSize: 100 },
+    pagination: { page: 1, pageSize: 2000 },
   });
   const { data: teamStadiums, isLoading: tsLoading } = useTeamStadiums({
     season: currentSeason,
@@ -162,50 +177,91 @@ export const AppRouter = () => {
   const payments = useMemo(() => paymentsData?.data || [], [paymentsData]);
 
   // Mutations
-  const { mutate: updateAssignmentMutate } = useUpdateAssignment();
-  const onUpdateAssignment = (
+  const { mutateAsync: updateAssignmentMutate } = useUpdateAssignment();
+  const onUpdateAssignment = async (
     matchId: string,
     assignmentId: string,
     officialId: string | null
   ) => {
-    updateAssignmentMutate({
-      id: assignmentId,
-      officialId: officialId,
-      matchId,
-    });
-    logAudit({
-      action: "update_assignment",
-      table: "match_assignments",
-      recordId: assignmentId,
-      newValues: { official_id: officialId },
-      userId: user?.id || null,
-      userName: user?.user_metadata?.full_name || null,
-      userEmail: user?.email || null,
-    });
+    if (!user?.id) {
+      showNotification(
+        "Session requise pour modifier une désignation.",
+        "error"
+      );
+      return;
+    }
+    try {
+      await updateAssignmentMutate({
+        id: assignmentId,
+        officialId: officialId,
+        matchId,
+        updatedBy: user.id,
+      });
+      await supabase
+        .from("matches")
+        .update({ has_unsent_changes: true, updated_by: user.id })
+        .eq("id", matchId);
+      showNotification("Désignation mise à jour.", "success");
+      queryClient.invalidateQueries({ queryKey: ["matches"] });
+    } catch (e: any) {
+      showNotification(
+        `Erreur mise à jour désignation: ${e.message || e}`,
+        "error"
+      );
+    }
   };
   const { mutate: markOfficialAbsentMutate } = useMarkOfficialAbsent();
   const onMarkOfficialAbsent = (matchId: string, assignmentId: string) => {
     const match = matches.find((m) => m.id === matchId);
     const assignment = match?.assignments.find((a) => a.id === assignmentId);
     if (assignment?.officialId) {
-      markOfficialAbsentMutate({
-        assignmentId,
-        officialId: assignment.officialId,
-      });
+      markOfficialAbsentMutate(
+        {
+          assignmentId,
+          officialId: assignment.officialId,
+          updatedBy: user?.id || null,
+        },
+        {
+          onSuccess: () => {
+            showNotification("Officiel marqué absent.", "success");
+          },
+          onError: (e: any) => {
+            showNotification(
+              `Erreur marquage absence: ${e?.message || e}`,
+              "error"
+            );
+          },
+        }
+      );
     }
   };
   const { mutateAsync: addAssignmentMutate } = useCreateAssignment();
   const { mutate: removeAssignmentMutate } = useDeleteAssignment();
-  const onRemoveAssignment = (matchId: string, assignmentId: string) => {
-    removeAssignmentMutate(assignmentId);
-    logAudit({
-      action: "delete_assignment",
-      table: "match_assignments",
-      recordId: assignmentId,
-      userId: user?.id || null,
-      userName: user?.user_metadata?.full_name || null,
-      userEmail: user?.email || null,
-    });
+  const onRemoveAssignment = async (matchId: string, assignmentId: string) => {
+    try {
+      await new Promise<void>((resolve, reject) =>
+        removeAssignmentMutate(assignmentId, {
+          onSuccess: () => resolve(),
+          onError: (e: any) => reject(e),
+        })
+      );
+      const { error: upErr } = await supabase
+        .from("matches")
+        .update({ has_unsent_changes: true, updated_by: user?.id || null })
+        .eq("id", matchId);
+      if (upErr)
+        return logAndThrow("set match unsent after assignment removal", upErr, {
+          matchId,
+          assignmentId,
+        });
+      queryClient.invalidateQueries({ queryKey: ["matches"] });
+      showNotification("Désignation supprimée.", "success");
+    } catch (e: any) {
+      showNotification(
+        `Erreur suppression désignation: ${e.message || e}`,
+        "error"
+      );
+    }
   };
   const { mutate: updateMatchMutate } = useUpdateMatch();
   // Map UI status labels to DB enum values
@@ -226,13 +282,79 @@ export const AppRouter = () => {
     }
   };
   const onUpdateMatchStatus = (matchId: string, status: MatchStatus) =>
-    updateMatchMutate({ id: matchId, status: mapUiStatusToDb(status) as any });
+    updateMatchMutate(
+      { id: matchId, status: mapUiStatusToDb(status) as any },
+      {
+        onSuccess: () => {
+          showNotification("Statut du match mis à jour.", "success");
+        },
+        onError: (error: any) => {
+          showNotification(
+            `Erreur mise à jour statut: ${error?.message || error}`,
+            "error"
+          );
+        },
+      }
+    );
 
   useEffect(() => {
     // No-op: just keeping file structure consistent
   }, []);
+
+  // Client-side action logging for sensitive read actions (complements DB triggers)
+  const logAction = useCallback(
+    async (
+      action: string,
+      details?: { tableName?: string; recordId?: string | null }
+    ) => {
+      try {
+        await supabase.from("audit_logs").insert({
+          user_id: user?.id || null,
+          user_name: (user as any)?.user_metadata?.full_name || null,
+          user_email: (user as any)?.email || null,
+          action,
+          table_name: details?.tableName || null,
+          record_id: details?.recordId || null,
+          user_agent:
+            typeof navigator !== "undefined" ? navigator.userAgent : null,
+        });
+      } catch (e) {
+        console.warn("audit logAction failed", e);
+      }
+    },
+    [user]
+  );
   const { mutate: archiveMatchMutate } = useArchiveMatch();
-  const onArchiveMatch = (matchId: string) => archiveMatchMutate(matchId);
+  const onArchiveMatch = async (matchId: string) => {
+    try {
+      // Guard: prevent archiving if accounting is validated or closed
+      const { data: m, error: mErr } = await supabase
+        .from("matches")
+        .select("id, accounting_status")
+        .eq("id", matchId)
+        .single();
+      if (mErr)
+        return logAndThrow("select match before archive", mErr, { matchId });
+      const acc = (m as any)?.accounting_status as string | undefined;
+      if (acc === "validated" || acc === "closed") {
+        const statusLabel = acc === "validated" ? "Validé" : "Clôturé";
+        showNotification(
+          `Impossible d'archiver ce match: statut comptable ${statusLabel}.`,
+          "error"
+        );
+        return;
+      }
+      archiveMatchMutate(matchId, {
+        onSuccess: () => {
+          showNotification("Match archivé.", "success");
+        },
+        onError: (e: any) =>
+          showNotification(`Erreur archivage match: ${e.message}`, "error"),
+      } as any);
+    } catch (e: any) {
+      showNotification(`Erreur archivage match: ${e.message}`, "error");
+    }
+  };
 
   // FIX: Address incompatible 'onUpdateGameDaySchedule' prop type. The useBulkUpdateMatchSchedule hook
   // expects an object with 'matchIds', but the Dashboard component provides 'leagueGroupId' and 'gameDay'.
@@ -253,11 +375,31 @@ export const AppRouter = () => {
       .map((m) => m.id);
 
     if (matchIds.length > 0) {
-      bulkUpdateMatchScheduleMutate({
-        matchIds,
-        matchDate: date,
-        matchTime: time,
-      });
+      showNotification(
+        `Mise à jour des horaires pour ${matchIds.length} match(s)...`,
+        "info"
+      );
+      bulkUpdateMatchScheduleMutate(
+        {
+          matchIds,
+          matchDate: date,
+          matchTime: time,
+        },
+        {
+          onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ["matches"] });
+            showNotification("Horaires de la journée mis à jour.", "success");
+          },
+          onError: (e: any) => {
+            showNotification(
+              `Erreur mise à jour horaires: ${e?.message || e}`,
+              "error"
+            );
+          },
+        }
+      );
+    } else {
+      showNotification("Aucun match trouvé pour cette journée/groupe.", "info");
     }
   };
 
@@ -266,10 +408,12 @@ export const AppRouter = () => {
       matchId,
       homeScore,
       awayScore,
+      label,
     }: {
       matchId: string;
       homeScore: number;
       awayScore: number;
+      label?: string;
     }) => {
       // Set DB enum value for completed
       const { data, error } = await supabase
@@ -282,12 +426,21 @@ export const AppRouter = () => {
         .eq("id", matchId)
         .select()
         .single();
-      if (error) throw error;
+      if (error)
+        return logAndThrow("update match score+status", error, {
+          matchId,
+          homeScore,
+          awayScore,
+        });
       return data;
     },
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ["matches"] });
-      showNotification("Score enregistré avec succès.", "success");
+      if (variables?.label) {
+        showNotification(`Score mis à jour: ${variables.label}.`, "success");
+      } else {
+        showNotification("Score enregistré avec succès.", "success");
+      }
     },
     onError: (error) => showNotification(`Erreur: ${error.message}`, "error"),
   });
@@ -297,20 +450,11 @@ export const AppRouter = () => {
     homeScore: number,
     awayScore: number
   ) => {
-    onUpdateMatchScoreAndStatusMutate({ matchId, homeScore, awayScore });
-    logAudit({
-      action: "update_match_score",
-      table: "matches",
-      recordId: matchId,
-      newValues: {
-        home_score: homeScore,
-        away_score: awayScore,
-        status: "completed",
-      },
-      userId: user?.id || null,
-      userName: user?.user_metadata?.full_name || null,
-      userEmail: user?.email || null,
-    });
+    const match = matches.find((m) => m.id === matchId);
+    const home = match?.homeTeam?.name || "Domicile";
+    const away = match?.awayTeam?.name || "Extérieur";
+    const label = `${home} ${homeScore} - ${awayScore} ${away}`;
+    onUpdateMatchScoreAndStatusMutate({ matchId, homeScore, awayScore, label });
   };
 
   const { mutate: onSaveMatch } = useMutation({
@@ -346,43 +490,37 @@ export const AppRouter = () => {
       if (id) {
         const { data, error } = await supabase
           .from("matches")
-          .update(upsertData)
+          .update({ ...upsertData, updated_by: user?.id || null })
           .eq("id", id)
           .select()
           .single();
-        if (error) throw error;
-        logAudit({
-          action: "update_match",
-          table: "matches",
-          recordId: id,
-          newValues: upsertData,
-          userId: user?.id || null,
-          userName: user?.user_metadata?.full_name || null,
-          userEmail: user?.email || null,
-        });
+        if (error)
+          return logAndThrow("update match (router onSaveMatch)", error, {
+            id,
+            upsertData,
+          });
         return data;
       } else {
         const { data, error } = await supabase
           .from("matches")
-          .insert(upsertData)
+          .insert({
+            ...upsertData,
+            created_by: user?.id || null,
+            updated_by: user?.id || null,
+            status: "scheduled",
+          })
           .select()
           .single();
-        if (error) throw error;
-        logAudit({
-          action: "create_match",
-          table: "matches",
-          recordId: data.id,
-          newValues: upsertData,
-          userId: user?.id || null,
-          userName: user?.user_metadata?.full_name || null,
-          userEmail: user?.email || null,
-        });
+        if (error)
+          return logAndThrow("insert match (router onSaveMatch)", error, {
+            upsertData,
+          });
         return data;
       }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["matches"] });
-      showNotification("Match sauvegardé avec succès.", "success");
+      showNotification("Match planifié/mis à jour avec succès.", "success");
     },
     onError: (error) => showNotification(`Erreur: ${error.message}`, "error"),
   });
@@ -396,12 +534,17 @@ export const AppRouter = () => {
 
   const handleSendMatchSheet = async (matchId: string) => {
     const match = matches.find((m) => m.id === matchId);
-    if (!match) return;
+    if (!match) {
+      showNotification("Match introuvable pour envoi de feuille.", "error");
+      return;
+    }
+    showNotification("Envoi de la feuille de match en cours...", "info");
     await sendMatchSheetMutation({
       match,
       officials,
       locations: settings?.locations || [],
     });
+    showNotification("Feuille de match envoyée.", "success");
   };
 
   // --- Clubs & Stadiums handlers ---
@@ -432,15 +575,23 @@ export const AppRouter = () => {
       if (team.id) {
         const { error } = await supabase
           .from("teams")
-          .update(payload)
+          .update({ ...payload, updated_by: user?.id || null })
           .eq("id", team.id);
-        if (error) throw error;
+        if (error)
+          return logAndThrow("update team", error, {
+            teamId: team.id,
+            payload,
+          });
       } else {
-        const { error } = await supabase.from("teams").insert(payload);
-        if (error) throw error;
+        const { error } = await supabase.from("teams").insert({
+          ...payload,
+          created_by: user?.id || null,
+          updated_by: user?.id || null,
+        });
+        if (error) return logAndThrow("insert team", error, { payload });
       }
       await queryClient.invalidateQueries({ queryKey: ["teams"] });
-      showNotification("Équipe sauvegardée.", "success");
+      showNotification(`Équipe "${team.name}" sauvegardée.`, "success");
     } catch (e: any) {
       showNotification(`Erreur sauvegarde équipe: ${e.message}`, "error");
     }
@@ -448,13 +599,30 @@ export const AppRouter = () => {
 
   const onArchiveTeam = async (teamId: string) => {
     try {
+      // Prevent archiving if team is used in any non-archived match
+      const { data: usage, error: usageErr } = await supabase
+        .from("matches")
+        .select("id")
+        .or(`home_team_id.eq.${teamId},away_team_id.eq.${teamId}`)
+        .eq("is_archived", false)
+        .limit(1);
+      if (usageErr)
+        return logAndThrow("usage check team archive", usageErr, { teamId });
+      if (Array.isArray(usage) && usage.length > 0) {
+        showNotification(
+          "Impossible d'archiver: l'équipe est utilisée dans des matchs actifs.",
+          "error"
+        );
+        return;
+      }
+      const teamName = teams.find((t) => t.id === teamId)?.name || "Équipe";
       const { error } = await supabase
         .from("teams")
-        .update({ is_archived: true })
+        .update({ is_archived: true, updated_by: user?.id || null })
         .eq("id", teamId);
-      if (error) throw error;
+      if (error) return logAndThrow("archive team", error, { teamId });
       await queryClient.invalidateQueries({ queryKey: ["teams"] });
-      showNotification("Équipe archivée.", "success");
+      showNotification(`"${teamName}" archivée.`, "success");
     } catch (e: any) {
       showNotification(`Erreur archivage équipe: ${e.message}`, "error");
     }
@@ -470,15 +638,23 @@ export const AppRouter = () => {
       if (stadium.id) {
         const { error } = await supabase
           .from("stadiums")
-          .update(payload)
+          .update({ ...payload, updated_by: user?.id || null })
           .eq("id", stadium.id);
-        if (error) throw error;
+        if (error)
+          return logAndThrow("update stadium", error, {
+            stadiumId: stadium.id,
+            payload,
+          });
       } else {
-        const { error } = await supabase.from("stadiums").insert(payload);
-        if (error) throw error;
+        const { error } = await supabase.from("stadiums").insert({
+          ...payload,
+          created_by: user?.id || null,
+          updated_by: user?.id || null,
+        });
+        if (error) return logAndThrow("insert stadium", error, { payload });
       }
       await queryClient.invalidateQueries({ queryKey: ["stadiums"] });
-      showNotification("Stade sauvegardé.", "success");
+      showNotification(`Stade "${stadium.name}" sauvegardé.`, "success");
     } catch (e: any) {
       showNotification(`Erreur sauvegarde stade: ${e.message}`, "error");
     }
@@ -486,13 +662,33 @@ export const AppRouter = () => {
 
   const onArchiveStadium = async (stadiumId: string) => {
     try {
+      // Prevent archiving if stadium is used in any non-archived match
+      const { data: usage, error: usageErr } = await supabase
+        .from("matches")
+        .select("id")
+        .eq("stadium_id", stadiumId)
+        .eq("is_archived", false)
+        .limit(1);
+      if (usageErr)
+        return logAndThrow("usage check stadium archive", usageErr, {
+          stadiumId,
+        });
+      if (Array.isArray(usage) && usage.length > 0) {
+        showNotification(
+          "Impossible d'archiver: le stade est utilisé dans des matchs actifs.",
+          "error"
+        );
+        return;
+      }
+      const stadiumName =
+        stadiums.find((s) => s.id === stadiumId)?.name || "Stade";
       const { error } = await supabase
         .from("stadiums")
-        .update({ is_archived: true })
+        .update({ is_archived: true, updated_by: user?.id || null })
         .eq("id", stadiumId);
-      if (error) throw error;
+      if (error) return logAndThrow("archive stadium", error, { stadiumId });
       await queryClient.invalidateQueries({ queryKey: ["stadiums"] });
-      showNotification("Stade archivé.", "success");
+      showNotification(`"${stadiumName}" archivé.`, "success");
     } catch (e: any) {
       showNotification(`Erreur archivage stade: ${e.message}`, "error");
     }
@@ -514,15 +710,36 @@ export const AppRouter = () => {
         .delete()
         .eq("team_id", teamId)
         .eq("season", season);
-      if (delErr) throw delErr;
+      if (delErr)
+        return logAndThrow("delete team_stadiums for team+season", delErr, {
+          teamId,
+          season,
+        });
       if (stadiumId) {
-        const { error: insErr } = await supabase
-          .from("team_stadiums")
-          .insert({ team_id: teamId, stadium_id: stadiumId, season });
-        if (insErr) throw insErr;
+        const { error: insErr } = await supabase.from("team_stadiums").insert({
+          team_id: teamId,
+          stadium_id: stadiumId,
+          season,
+          created_by: user?.id || null,
+        });
+        if (insErr)
+          return logAndThrow("insert team_stadiums", insErr, {
+            teamId,
+            stadiumId,
+            season,
+          });
       }
       await queryClient.invalidateQueries({ queryKey: ["teamStadiums"] });
-      showNotification("Stade à domicile mis à jour.", "success");
+      const teamName = teams.find((t) => t.id === teamId)?.name || "Équipe";
+      const stadiumName = stadiumId
+        ? stadiums.find((s) => s.id === stadiumId)?.name || "Stade"
+        : null;
+      showNotification(
+        stadiumName
+          ? `Stade à domicile de "${teamName}" défini sur "${stadiumName}".`
+          : `Stade à domicile de "${teamName}" effacé.`,
+        "success"
+      );
     } catch (e: any) {
       showNotification(
         `Erreur mise à jour stade domicile: ${e.message}`,
@@ -537,13 +754,297 @@ export const AppRouter = () => {
   ) => {
     const match = matches.find((m) => m.id === matchId);
     const official = officials.find((o) => o.id === officialId);
-    if (!match || !official) return;
-    await sendIndividualMissionOrderMutation({
-      match,
-      official,
-      allOfficials: officials,
-      allLocations: settings?.locations || [],
+    if (!match || !official) {
+      showNotification("Match ou officiel introuvable.", "error");
+      return;
+    }
+    try {
+      showNotification("Envoi de l'ordre de mission...", "info");
+      await sendIndividualMissionOrderMutation({
+        match,
+        official,
+        allOfficials: officials,
+        allLocations: settings?.locations || [],
+      });
+      showNotification("Ordre de mission envoyé.", "success");
+    } catch (e: any) {
+      showNotification(
+        `Erreur envoi ordre de mission: ${e?.message || e}`,
+        "error"
+      );
+    }
+  };
+
+  const onPrintIndividualMissionOrder = async (
+    matchId: string,
+    officialId: string
+  ) => {
+    try {
+      const blob = await generateMissionOrderPDF(matchId, officialId);
+      const official = officials.find((o) => o.id === officialId);
+      const match = matches.find((m) => m.id === matchId);
+      const dateStr = match?.matchDate || new Date().toISOString().slice(0, 10);
+      const safeName = (official?.fullName || officialId).replace(/\s+/g, "_");
+      downloadBlob(blob, `Ordre_Mission_${safeName}_${dateStr}.pdf`);
+      showNotification("Ordre de mission généré.", "success");
+    } catch (e: any) {
+      showNotification(`Erreur génération PDF: ${e.message}`, "error");
+    }
+  };
+
+  const handleSendAllMissionOrders = async (matchId: string) => {
+    const match = matches.find((m) => m.id === matchId);
+    if (!match) {
+      showNotification("Match non trouvé.", "error");
+      return;
+    }
+    const assignedOfficials = match.assignments
+      .map((a) => officials.find((o) => o.id === a.officialId))
+      .filter((o): o is Official => !!o && !!o.email);
+    if (assignedOfficials.length === 0) {
+      showNotification(
+        "Aucun officiel désigné avec un email pour ce match.",
+        "error"
+      );
+      return;
+    }
+    showNotification(
+      `Envoi en cours pour ${assignedOfficials.length} officiels...`,
+      "info"
+    );
+    const results = await Promise.all(
+      assignedOfficials.map((o) =>
+        handleSendIndividualMissionOrder(matchId, o.id)
+          .then(() => ({ ok: true, name: o.fullName }))
+          .catch((e) => ({ ok: false, name: o.fullName, err: e }))
+      )
+    );
+    const fail = results.filter((r) => !r.ok);
+    const ok = results.filter((r) => r.ok);
+    if (ok.length > 0)
+      showNotification(
+        `${ok.length} ordre(s) envoyé(s) avec succès.`,
+        "success"
+      );
+    if (fail.length > 0)
+      showNotification(
+        `${fail.length} échec(s): ${fail.map((f) => f.name).join(", ")}.`,
+        "error"
+      );
+  };
+
+  // --- Officials handlers parity ---
+  const onUpdateUnavailabilities = async (
+    officialId: string,
+    newUnavs: Array<{
+      id?: string;
+      startDate: string;
+      endDate: string;
+      reason?: string | null;
+      isApproved?: boolean | null;
+    }>
+  ) => {
+    try {
+      const { error: delErr } = await supabase
+        .from("official_unavailabilities")
+        .delete()
+        .match({ official_id: officialId });
+      if (delErr)
+        return logAndThrow("delete official_unavailabilities", delErr, {
+          officialId,
+        });
+      if (newUnavs.length > 0) {
+        const rows = newUnavs.map((u) => ({
+          official_id: officialId,
+          start_date: u.startDate,
+          end_date: u.endDate,
+          reason: u.reason ?? null,
+          is_approved: u.isApproved ?? false,
+          created_by: user?.id || null,
+        }));
+        const { error: insErr } = await supabase
+          .from("official_unavailabilities")
+          .insert(rows);
+        if (insErr)
+          return logAndThrow("insert official_unavailabilities", insErr, {
+            officialId,
+            count: rows.length,
+          });
+      }
+      await queryClient.invalidateQueries({ queryKey: ["officials"] });
+      showNotification("Disponibilités mises à jour.", "success");
+    } catch (e: any) {
+      showNotification(`Erreur: ${e.message}`, "error");
+    }
+  };
+
+  const onSaveOfficial = async (official: Official) => {
+    try {
+      const payload: any = {
+        id: official.id,
+        first_name: official.firstName,
+        last_name: official.lastName,
+        first_name_ar: official.firstNameAr,
+        last_name_ar: official.lastNameAr,
+        category: official.category,
+        location_id: official.locationId,
+        address: official.address,
+        position: official.position,
+        email: official.email,
+        phone: official.phone,
+        bank_account_number: official.bankAccountNumber,
+        is_active: official.isActive,
+        user_id: official.userId,
+        updated_by: user?.id || null,
+      };
+      const isNew = !official.createdAt;
+      if (isNew) payload.created_by = user?.id || null;
+      const { error } = await supabase.from("officials").upsert(payload);
+      if (error) return logAndThrow("upsert official", error, { payload });
+      await queryClient.invalidateQueries({ queryKey: ["officials"] });
+      showNotification(
+        `Officiel "${official.fullName}" sauvegardé.`,
+        "success"
+      );
+    } catch (e: any) {
+      showNotification(`Erreur: ${e.message}`, "error");
+    }
+  };
+
+  const onArchiveOfficial = async (officialId: string) => {
+    try {
+      // Prevent archiving if official has active assignments in non-archived matches
+      const { data: usage, error: usageErr } = await supabase
+        .from("matches")
+        .select("id, match_assignments!inner(official_id)")
+        .eq("match_assignments.official_id", officialId)
+        .eq("is_archived", false)
+        .limit(1);
+      if (usageErr)
+        return logAndThrow("usage check official archive", usageErr, {
+          officialId,
+        });
+      if (Array.isArray(usage) && usage.length > 0) {
+        showNotification(
+          "Impossible d'archiver: l'officiel est désigné sur des matchs actifs.",
+          "error"
+        );
+        return;
+      }
+      const { error } = await supabase
+        .from("officials")
+        .update({ is_archived: true, updated_by: user?.id || null })
+        .eq("id", officialId);
+      if (error) return logAndThrow("archive official", error, { officialId });
+      await queryClient.invalidateQueries({ queryKey: ["officials"] });
+      const name =
+        officials.find((o) => o.id === officialId)?.fullName || "Officiel";
+      showNotification(`"${name}" archivé.`, "success");
+    } catch (e: any) {
+      showNotification(`Erreur: ${e.message}`, "error");
+    }
+  };
+
+  const onBulkUpdateOfficialLocations = async (
+    officialIds: string[],
+    newLocationId: string
+  ) => {
+    if (officialIds.length === 0 || !newLocationId) return;
+    try {
+      const updates = officialIds.map((id) => ({
+        id,
+        location_id: newLocationId,
+        updated_by: user?.id || null,
+      }));
+      const { error } = await supabase.from("officials").upsert(updates);
+      if (error) throw error;
+      await queryClient.invalidateQueries({ queryKey: ["officials"] });
+      showNotification(
+        `${officialIds.length} officiel(s) mis à jour.`,
+        "success"
+      );
+    } catch (e: any) {
+      showNotification(`Erreur: ${e.message}`, "error");
+    }
+  };
+
+  const onBulkUpdateOfficialCategory = async (
+    officialIds: string[],
+    newCategory: string
+  ) => {
+    if (officialIds.length === 0 || !newCategory) return;
+    try {
+      const updates = officialIds.map((id) => ({
+        id,
+        category: newCategory,
+        updated_by: user?.id || null,
+      }));
+      const { error } = await supabase.from("officials").upsert(updates);
+      if (error) throw error;
+      await queryClient.invalidateQueries({ queryKey: ["officials"] });
+      showNotification(
+        `Catégorie mise à jour pour ${officialIds.length} officiels.`,
+        "success"
+      );
+    } catch (e: any) {
+      showNotification(`Erreur: ${e.message}`, "error");
+    }
+  };
+
+  const onBulkArchiveOfficials = async (officialIds: string[]) => {
+    if (officialIds.length === 0) return;
+    try {
+      const { error } = await supabase
+        .from("officials")
+        .update({ is_archived: true, updated_by: user?.id || null })
+        .in("id", officialIds);
+      if (error) throw error;
+      await queryClient.invalidateQueries({ queryKey: ["officials"] });
+      showNotification(
+        `${officialIds.length} officiel(s) archivés.`,
+        "success"
+      );
+    } catch (e: any) {
+      showNotification(`Erreur: ${e.message}`, "error");
+    }
+  };
+
+  const onSendBulkMessage = async (
+    officialIds: string[],
+    subject: string,
+    message: string
+  ) => {
+    const recipients = officials
+      .filter((o) => officialIds.includes(o.id) && o.email)
+      .map((o) => o.email!)
+      .filter((e) => e.trim().length > 0);
+    if (recipients.length === 0) {
+      showNotification("Aucun destinataire avec email valide.", "error");
+      return;
+    }
+    showNotification(
+      `Préparation de l'envoi: ${recipients.length} destinataires.`,
+      "info"
+    );
+    const { error } = await supabase.functions.invoke("send-email", {
+      body: {
+        to: recipients,
+        subject,
+        text: message,
+        html: `<p>${message.replace(/\n/g, "<br>")}</p>`,
+      },
     });
+    if (error) {
+      logWarning("send-email failed", {
+        message: error.message,
+        recipients: recipients.length,
+      });
+      showNotification(`Erreur d'envoi: ${error.message}`, "error");
+    } else
+      showNotification(
+        `Message envoyé à ${recipients.length} destinataires.`,
+        "success"
+      );
   };
 
   // --- Settings & Leagues/Groups handlers ---
@@ -554,7 +1055,8 @@ export const AppRouter = () => {
         .from("app_settings_versions")
         .update({ is_active: false })
         .eq("is_active", true);
-      if (deactivateError) throw deactivateError;
+      if (deactivateError)
+        return logAndThrow("deactivate app_settings_versions", deactivateError);
 
       // Insert new active version
       const payload = {
@@ -565,19 +1067,12 @@ export const AppRouter = () => {
       const { error: insertError } = await supabase
         .from("app_settings_versions")
         .insert(payload);
-      if (insertError) throw insertError;
+      if (insertError)
+        return logAndThrow("insert app_settings_version", insertError, payload);
 
       await queryClient.invalidateQueries({ queryKey: ["appSettings"] });
       showNotification("Paramètres enregistrés.", "success");
-      logAudit({
-        action: "update_settings",
-        table: "app_settings_versions",
-        recordId: null,
-        newValues: newSettings,
-        userId: user?.id || null,
-        userName: user?.user_metadata?.full_name || null,
-        userEmail: user?.email || null,
-      });
+      setSettingsDirty(false);
     } catch (e: any) {
       showNotification(`Erreur sauvegarde paramètres: ${e.message}`, "error");
     }
@@ -593,24 +1088,23 @@ export const AppRouter = () => {
       if (league.id) {
         const { error } = await supabase
           .from("leagues")
-          .update(payload)
+          .update({ ...payload, updated_by: user?.id || null })
           .eq("id", league.id);
-        if (error) throw error;
+        if (error)
+          return logAndThrow("update league", error, {
+            id: league.id,
+            payload,
+          });
       } else {
-        const { error } = await supabase.from("leagues").insert(payload);
-        if (error) throw error;
+        const { error } = await supabase.from("leagues").insert({
+          ...payload,
+          created_by: user?.id || null,
+          updated_by: user?.id || null,
+        });
+        if (error) return logAndThrow("insert league", error, { payload });
       }
       await queryClient.invalidateQueries({ queryKey: ["leagues"] });
-      showNotification("Ligue sauvegardée.", "success");
-      logAudit({
-        action: league.id ? "update_league" : "create_league",
-        table: "leagues",
-        recordId: (league.id as string) || null,
-        newValues: payload,
-        userId: user?.id || null,
-        userName: user?.user_metadata?.full_name || null,
-        userEmail: user?.email || null,
-      });
+      showNotification(`Ligue "${league.name}" sauvegardée.`, "success");
     } catch (e: any) {
       showNotification(`Erreur sauvegarde ligue: ${e.message}`, "error");
     }
@@ -626,24 +1120,23 @@ export const AppRouter = () => {
       if (group.id) {
         const { error } = await supabase
           .from("league_groups")
-          .update(payload)
+          .update({ ...payload, updated_by: user?.id || null })
           .eq("id", group.id);
-        if (error) throw error;
+        if (error)
+          return logAndThrow("update league_group", error, {
+            id: group.id,
+            payload,
+          });
       } else {
-        const { error } = await supabase.from("league_groups").insert(payload);
-        if (error) throw error;
+        const { error } = await supabase.from("league_groups").insert({
+          ...payload,
+          created_by: user?.id || null,
+          updated_by: user?.id || null,
+        });
+        if (error) return logAndThrow("insert league_group", error, payload);
       }
       await queryClient.invalidateQueries({ queryKey: ["leagueGroups"] });
-      showNotification("Groupe sauvegardé.", "success");
-      logAudit({
-        action: group.id ? "update_league_group" : "create_league_group",
-        table: "league_groups",
-        recordId: (group.id as string) || null,
-        newValues: payload,
-        userId: user?.id || null,
-        userName: user?.user_metadata?.full_name || null,
-        userEmail: user?.email || null,
-      });
+      showNotification(`Groupe "${group.name}" sauvegardé.`, "success");
     } catch (e: any) {
       showNotification(`Erreur sauvegarde groupe: ${e.message}`, "error");
     }
@@ -656,7 +1149,8 @@ export const AppRouter = () => {
         .from("league_group_teams")
         .delete()
         .eq("league_group_id", groupId);
-      if (delErr) throw delErr;
+      if (delErr)
+        return logAndThrow("clear league_group_teams", delErr, { groupId });
       // Insert new links
       if (teamIds.length > 0) {
         const rows = teamIds.map((teamId) => ({
@@ -666,19 +1160,17 @@ export const AppRouter = () => {
         const { error: insErr } = await supabase
           .from("league_group_teams")
           .insert(rows);
-        if (insErr) throw insErr;
+        if (insErr)
+          return logAndThrow("insert league_group_teams", insErr, {
+            groupId,
+            count: rows.length,
+          });
       }
       await queryClient.invalidateQueries({ queryKey: ["leagueGroups"] });
-      showNotification("Équipes du groupe mises à jour.", "success");
-      logAudit({
-        action: "update_league_group_teams",
-        table: "league_group_teams",
-        recordId: groupId,
-        newValues: { teamIds },
-        userId: user?.id || null,
-        userName: user?.user_metadata?.full_name || null,
-        userEmail: user?.email || null,
-      });
+      showNotification(
+        `${teamIds.length} équipe(s) associée(s) au groupe.`,
+        "success"
+      );
     } catch (e: any) {
       showNotification(
         `Erreur mise à jour équipes du groupe: ${e.message}`,
@@ -689,21 +1181,30 @@ export const AppRouter = () => {
 
   const onDeleteLeague = async (leagueId: string) => {
     try {
+      // Prevent deleting league if it has groups
+      const { data: grp, error: gErr } = await supabase
+        .from("league_groups")
+        .select("id")
+        .eq("league_id", leagueId)
+        .limit(1);
+      if (gErr)
+        return logAndThrow("select league_groups by league", gErr, {
+          leagueId,
+        });
+      if (Array.isArray(grp) && grp.length > 0) {
+        showNotification(
+          "Impossible de supprimer: des groupes existent pour cette ligue.",
+          "error"
+        );
+        return;
+      }
       const { error } = await supabase
         .from("leagues")
         .delete()
         .eq("id", leagueId);
-      if (error) throw error;
+      if (error) return logAndThrow("delete league", error, { leagueId });
       await queryClient.invalidateQueries({ queryKey: ["leagues"] });
       showNotification("Ligue supprimée.", "success");
-      logAudit({
-        action: "delete_league",
-        table: "leagues",
-        recordId: leagueId,
-        userId: user?.id || null,
-        userName: user?.user_metadata?.full_name || null,
-        userEmail: user?.email || null,
-      });
     } catch (e: any) {
       showNotification(`Erreur suppression ligue: ${e.message}`, "error");
     }
@@ -711,28 +1212,38 @@ export const AppRouter = () => {
 
   const onDeleteLeagueGroup = async (groupId: string) => {
     try {
+      // Prevent deleting group if referenced by matches
+      const { data: m, error: mErr } = await supabase
+        .from("matches")
+        .select("id")
+        .eq("league_group_id", groupId)
+        .limit(1);
+      if (mErr)
+        return logAndThrow("select matches by group", mErr, { groupId });
+      if (Array.isArray(m) && m.length > 0) {
+        showNotification(
+          "Impossible de supprimer: des matchs référencent ce groupe.",
+          "error"
+        );
+        return;
+      }
       // Delete team links first
       const { error: delLinksErr } = await supabase
         .from("league_group_teams")
         .delete()
         .eq("league_group_id", groupId);
-      if (delLinksErr) throw delLinksErr;
+      if (delLinksErr)
+        return logAndThrow("clear league_group_teams", delLinksErr, {
+          groupId,
+        });
       // Delete group
       const { error } = await supabase
         .from("league_groups")
         .delete()
         .eq("id", groupId);
-      if (error) throw error;
+      if (error) return logAndThrow("delete league_group", error, { groupId });
       await queryClient.invalidateQueries({ queryKey: ["leagueGroups"] });
       showNotification("Groupe supprimé.", "success");
-      logAudit({
-        action: "delete_league_group",
-        table: "league_groups",
-        recordId: groupId,
-        userId: user?.id || null,
-        userName: user?.user_metadata?.full_name || null,
-        userEmail: user?.email || null,
-      });
     } catch (e: any) {
       showNotification(`Erreur suppression groupe: ${e.message}`, "error");
     }
@@ -764,16 +1275,16 @@ export const AppRouter = () => {
       if (insErr) throw insErr;
 
       await queryClient.invalidateQueries({ queryKey: ["users"] });
-      showNotification("Rôle utilisateur mis à jour.", "success");
-      logAudit({
-        action: "update_user_role",
-        table: "user_roles",
-        recordId: userId,
-        newValues: { roleName },
-        userId: user?.id || null,
-        userName: user?.user_metadata?.full_name || null,
-        userEmail: user?.email || null,
-      });
+      const u = (users || []).find((u) => u.id === userId);
+      const displayName =
+        (u as any)?.fullName ||
+        (u as any)?.full_name ||
+        (u as any)?.email ||
+        userId;
+      showNotification(
+        `Rôle de ${displayName} mis à jour: ${roleName}.`,
+        "success"
+      );
     } catch (e: any) {
       showNotification(`Erreur mise à jour rôle: ${e.message}`, "error");
     }
@@ -784,19 +1295,11 @@ export const AppRouter = () => {
     try {
       const { error } = await supabase
         .from("officials")
-        .update({ is_archived: false })
+        .update({ is_archived: false, updated_by: user?.id || null })
         .eq("id", officialId);
-      if (error) throw error;
+      if (error) return logAndThrow("restore official", error, { officialId });
       await queryClient.invalidateQueries({ queryKey: ["officials"] });
       showNotification("Officiel restauré.", "success");
-      logAudit({
-        action: "restore_official",
-        table: "officials",
-        recordId: officialId,
-        userId: user?.id || null,
-        userName: user?.user_metadata?.full_name || null,
-        userEmail: user?.email || null,
-      });
     } catch (e: any) {
       showNotification(`Erreur restauration officiel: ${e.message}`, "error");
     }
@@ -806,19 +1309,11 @@ export const AppRouter = () => {
     try {
       const { error } = await supabase
         .from("teams")
-        .update({ is_archived: false })
+        .update({ is_archived: false, updated_by: user?.id || null })
         .eq("id", teamId);
-      if (error) throw error;
+      if (error) return logAndThrow("restore team", error, { teamId });
       await queryClient.invalidateQueries({ queryKey: ["teams"] });
       showNotification("Équipe restaurée.", "success");
-      logAudit({
-        action: "restore_team",
-        table: "teams",
-        recordId: teamId,
-        userId: user?.id || null,
-        userName: user?.user_metadata?.full_name || null,
-        userEmail: user?.email || null,
-      });
     } catch (e: any) {
       showNotification(`Erreur restauration équipe: ${e.message}`, "error");
     }
@@ -828,19 +1323,11 @@ export const AppRouter = () => {
     try {
       const { error } = await supabase
         .from("stadiums")
-        .update({ is_archived: false })
+        .update({ is_archived: false, updated_by: user?.id || null })
         .eq("id", stadiumId);
-      if (error) throw error;
+      if (error) return logAndThrow("restore stadium", error, { stadiumId });
       await queryClient.invalidateQueries({ queryKey: ["stadiums"] });
       showNotification("Stade restauré.", "success");
-      logAudit({
-        action: "restore_stadium",
-        table: "stadiums",
-        recordId: stadiumId,
-        userId: user?.id || null,
-        userName: user?.user_metadata?.full_name || null,
-        userEmail: user?.email || null,
-      });
     } catch (e: any) {
       showNotification(`Erreur restauration stade: ${e.message}`, "error");
     }
@@ -850,19 +1337,11 @@ export const AppRouter = () => {
     try {
       const { error } = await supabase
         .from("matches")
-        .update({ is_archived: false })
+        .update({ is_archived: false, updated_by: user?.id || null })
         .eq("id", matchId);
-      if (error) throw error;
+      if (error) return logAndThrow("restore match", error, { matchId });
       await queryClient.invalidateQueries({ queryKey: ["matches"] });
       showNotification("Match restauré.", "success");
-      logAudit({
-        action: "restore_match",
-        table: "matches",
-        recordId: matchId,
-        userId: user?.id || null,
-        userName: user?.user_metadata?.full_name || null,
-        userEmail: user?.email || null,
-      });
     } catch (e: any) {
       showNotification(`Erreur restauration match: ${e.message}`, "error");
     }
@@ -896,20 +1375,32 @@ export const AppRouter = () => {
     );
   }
 
-  const dummyFuncWithParams = async (...args: any[]) => {};
-
-  // FIX: The onAddAssignment prop passed to Dashboard was incompatible.
-  // This wrapper adapts the call to match the useCreateAssignment hook,
-  // creating an empty assignment slot by passing null for the officialId.
-  // This requires a corresponding fix in useCreateAssignment to allow a nullable officialId.
-  const onAddAssignment = (
+  const onAddAssignment = async (
     matchId: string,
     role: OfficialRole
   ): Promise<void> => {
-    // This now returns a promise that resolves to void, matching the prop type.
-    return addAssignmentMutate({ matchId, role, officialId: null }).then(
-      () => {}
-    );
+    try {
+      await addAssignmentMutate({
+        matchId,
+        role,
+        officialId: null,
+        createdBy: user?.id || null,
+        updatedBy: user?.id || null,
+      });
+      const { error: upErr } = await supabase
+        .from("matches")
+        .update({ has_unsent_changes: true, updated_by: user?.id || null })
+        .eq("id", matchId);
+      if (upErr)
+        return logAndThrow("set match unsent after add assignment", upErr, {
+          matchId,
+          role,
+        });
+      queryClient.invalidateQueries({ queryKey: ["matches"] });
+      showNotification("Désignation ajoutée.", "success");
+    } catch (e: any) {
+      showNotification(`Erreur ajout désignation: ${e?.message || e}`, "error");
+    }
   };
 
   const dashboardProps = {
@@ -933,20 +1424,17 @@ export const AppRouter = () => {
     onMarkOfficialAbsent,
     onArchiveMatch,
     onSendMatchSheet: handleSendMatchSheet,
-    onNotifyChanges: handleSendMatchSheet, // Same logic for now
+    onNotifyChanges: handleSendMatchSheet,
     onAddAssignment: onAddAssignment,
-    // FIX: The 'removeAssignmentMutate' function from the useDeleteAssignment hook expects only the 'assignmentId',
-    // but the 'onRemoveAssignment' prop requires '(matchId, assignmentId)'. This wrapper function correctly
-    // adapts the call signature to match the prop type while still using the mutation hook as intended.
     onRemoveAssignment,
     onUpdateGameDaySchedule,
     onSaveMatch,
     onSaveStadium: onSaveStadium,
     onUpdateOfficialEmail: (officialId: string, email: string) =>
       onUpdateOfficial({ id: officialId, email }),
-    onPrintIndividualMissionOrder: () => {},
+    onPrintIndividualMissionOrder: onPrintIndividualMissionOrder,
     onSendIndividualMissionOrder: handleSendIndividualMissionOrder,
-    onSendAllMissionOrders: () => {},
+    onSendAllMissionOrders: handleSendAllMissionOrders,
   };
 
   return (
@@ -982,10 +1470,79 @@ export const AppRouter = () => {
               teams={teams}
               matches={matches}
               permissions={permissions}
-              onSavePlayer={dummyFuncWithParams}
-              onArchivePlayer={dummyFuncWithParams}
-              onSaveSanction={dummyFuncWithParams}
-              onCancelSanction={dummyFuncWithParams}
+              onSavePlayer={async (player: any) => {
+                try {
+                  const {
+                    id,
+                    createdByName,
+                    updatedByName,
+                    fullName,
+                    ...rest
+                  } = player || {};
+                  const { error } = await supabase.from("players").upsert({
+                    ...rest,
+                    id,
+                    updated_by: user?.id || null,
+                    ...(id ? {} : { created_by: user?.id || null }),
+                  });
+                  if (error)
+                    return logAndThrow("upsert player (disciplinary)", error, {
+                      id,
+                      rest,
+                    });
+                  showNotification("Joueur sauvegardé.", "success");
+                  queryClient.invalidateQueries({ queryKey: ["players"] });
+                } catch (e: any) {
+                  showNotification(`Erreur: ${e.message}`, "error");
+                }
+              }}
+              onArchivePlayer={async (playerId: string) => {
+                try {
+                  const { error } = await supabase
+                    .from("players")
+                    .update({ is_archived: true, updated_by: user?.id || null })
+                    .eq("id", playerId);
+                  if (error)
+                    return logAndThrow("archive player", error, { playerId });
+                  showNotification("Joueur archivé.", "success");
+                } catch (e: any) {
+                  showNotification(`Erreur: ${e.message}`, "error");
+                }
+              }}
+              onSaveSanction={async (sanction: any) => {
+                try {
+                  const { id, createdByName, ...rest } = sanction || {};
+                  const { error } = await supabase.from("sanctions").upsert({
+                    ...rest,
+                    id,
+                    updated_by: user?.id || null,
+                    ...(id ? {} : { created_by: user?.id || null }),
+                  });
+                  if (error)
+                    return logAndThrow("upsert sanction", error, { id, rest });
+                  showNotification("Sanction sauvegardée.", "success");
+                } catch (e: any) {
+                  showNotification(`Erreur: ${e.message}`, "error");
+                }
+              }}
+              onCancelSanction={async (sanctionId: string) => {
+                try {
+                  const { error } = await supabase
+                    .from("sanctions")
+                    .update({
+                      is_cancelled: true,
+                      updated_by: user?.id || null,
+                    })
+                    .eq("id", sanctionId);
+                  if (error)
+                    return logAndThrow("cancel sanction", error, {
+                      sanctionId,
+                    });
+                  showNotification("Sanction annulée.", "success");
+                } catch (e: any) {
+                  showNotification(`Erreur: ${e.message}`, "error");
+                }
+              }}
               disciplinarySettings={settings?.disciplinary_settings || null}
             />
           }
@@ -998,16 +1555,16 @@ export const AppRouter = () => {
               matches={matches}
               officialCategories={settings?.official_categories || []}
               localisations={settings?.locations || []}
-              onUpdateUnavailabilities={() => {}}
-              onSaveOfficial={async () => {}}
-              onArchiveOfficial={() => {}}
-              onBulkUpdateOfficialLocations={() => {}}
-              onBulkArchiveOfficials={() => {}}
-              onBulkUpdateOfficialCategory={() => {}}
-              onSendBulkMessage={() => {}}
+              onUpdateUnavailabilities={onUpdateUnavailabilities}
+              onSaveOfficial={onSaveOfficial}
+              onArchiveOfficial={onArchiveOfficial}
+              onBulkUpdateOfficialLocations={onBulkUpdateOfficialLocations}
+              onBulkArchiveOfficials={onBulkArchiveOfficials}
+              onBulkUpdateOfficialCategory={onBulkUpdateOfficialCategory}
+              onSendBulkMessage={onSendBulkMessage}
               currentUser={user!}
               permissions={permissions}
-              logAction={async () => {}}
+              logAction={logAction}
             />
           }
         />
@@ -1039,8 +1596,50 @@ export const AppRouter = () => {
               payments={payments as Payment[]}
               matches={matches}
               officials={officials}
-              onUpdatePaymentNotes={() => {}}
-              onBulkUpdatePaymentNotes={() => {}}
+              onUpdatePaymentNotes={async (
+                assignmentId: string,
+                notes: string | null
+              ) => {
+                try {
+                  const { error } = await supabase
+                    .from("match_assignments")
+                    .update({ notes, updated_by: user?.id || null })
+                    .eq("id", assignmentId);
+                  if (error)
+                    return logAndThrow("update payment notes", error, {
+                      assignmentId,
+                    });
+                  showNotification("Note mise à jour.", "success");
+                  queryClient.invalidateQueries({ queryKey: ["payments"] });
+                } catch (e: any) {
+                  showNotification(`Erreur: ${e.message}`, "error");
+                }
+              }}
+              onBulkUpdatePaymentNotes={async (
+                updates: { id: string; notes: string | null }[]
+              ) => {
+                try {
+                  const rows = updates.map((u) => ({
+                    id: u.id,
+                    notes: u.notes,
+                    updated_by: user?.id || null,
+                  }));
+                  const { error } = await supabase
+                    .from("match_assignments")
+                    .upsert(rows);
+                  if (error)
+                    return logAndThrow("bulk update payment notes", error, {
+                      count: rows.length,
+                    });
+                  showNotification(
+                    `${updates.length} notes mises à jour.`,
+                    "success"
+                  );
+                  queryClient.invalidateQueries({ queryKey: ["payments"] });
+                } catch (e: any) {
+                  showNotification(`Erreur: ${e.message}`, "error");
+                }
+              }}
               currentUser={user!}
               users={users || []}
               permissions={permissions}
@@ -1068,12 +1667,177 @@ export const AppRouter = () => {
                 financialSettings={settings?.financial_settings || null}
                 rejectionReasons={settings?.rejection_reasons || []}
                 officialRoles={settings?.roles || []}
-                onSubmit={() => {}}
-                onValidate={() => {}}
-                onReject={() => {}}
-                onReopenGameDay={async () => {}}
-                onCloseMonth={async () => {}}
-                onReopenMonth={async () => {}}
+                onSubmit={async (
+                  matchId: string,
+                  scores: { home: number; away: number } | null,
+                  updatedAssignments: any[]
+                ) => {
+                  try {
+                    const matchUpdate: any = {
+                      accounting_status: "pending_validation",
+                      rejection_reason: null,
+                      rejection_comment: null,
+                      updated_by: user?.id || null,
+                    };
+                    if (scores) {
+                      matchUpdate.home_score = scores.home;
+                      matchUpdate.away_score = scores.away;
+                      matchUpdate.status = "completed";
+                    }
+                    const { error: mErr } = await supabase
+                      .from("matches")
+                      .update(matchUpdate)
+                      .eq("id", matchId);
+                    if (mErr)
+                      return logAndThrow(
+                        "accounting submit: update match",
+                        mErr,
+                        { matchId, matchUpdate }
+                      );
+
+                    if (updatedAssignments?.length) {
+                      const rows = updatedAssignments.map((a: any) => ({
+                        id: a.id,
+                        match_id: matchId,
+                        role: a.role,
+                        official_id: a.officialId,
+                        travel_distance_km: a.travelDistanceInKm ?? 0,
+                        indemnity_amount: a.indemnityAmount ?? 0,
+                        notes: a.notes ?? null,
+                        updated_by: user?.id || null,
+                      }));
+                      const { error: aErr } = await supabase
+                        .from("match_assignments")
+                        .upsert(rows);
+                      if (aErr)
+                        return logAndThrow(
+                          "accounting submit: upsert assignments",
+                          aErr,
+                          { count: rows.length, matchId }
+                        );
+                    }
+                    showNotification(
+                      "Données soumises pour validation.",
+                      "success"
+                    );
+                    queryClient.invalidateQueries({ queryKey: ["matches"] });
+                    queryClient.invalidateQueries({ queryKey: ["payments"] });
+                  } catch (e: any) {
+                    showNotification(`Erreur: ${e.message}`, "error");
+                  }
+                }}
+                onValidate={async (matchId: string) => {
+                  try {
+                    const { error } = await supabase
+                      .from("matches")
+                      .update({
+                        accounting_status: "validated",
+                        validated_by: user?.id || null,
+                        validated_at: new Date().toISOString(),
+                        updated_by: user?.id || null,
+                      })
+                      .eq("id", matchId);
+                    if (error)
+                      return logAndThrow("accounting validate", error, {
+                        matchId,
+                      });
+                    showNotification("Saisie validée.", "success");
+                    queryClient.invalidateQueries({ queryKey: ["matches"] });
+                    queryClient.invalidateQueries({ queryKey: ["payments"] });
+                  } catch (e: any) {
+                    showNotification(`Erreur: ${e.message}`, "error");
+                  }
+                }}
+                onReject={async (
+                  matchId: string,
+                  reason: string,
+                  comment: string
+                ) => {
+                  try {
+                    const { error } = await supabase
+                      .from("matches")
+                      .update({
+                        accounting_status: "rejected",
+                        rejection_reason: reason,
+                        rejection_comment: comment,
+                        validated_by: null,
+                        validated_at: null,
+                        updated_by: user?.id || null,
+                      })
+                      .eq("id", matchId);
+                    if (error)
+                      return logAndThrow("accounting reject", error, {
+                        matchId,
+                      });
+                    showNotification("Saisie rejetée.", "success");
+                    queryClient.invalidateQueries({ queryKey: ["matches"] });
+                    queryClient.invalidateQueries({ queryKey: ["payments"] });
+                  } catch (e: any) {
+                    showNotification(`Erreur: ${e.message}`, "error");
+                  }
+                }}
+                onReopenGameDay={async (periodId: string) => {
+                  try {
+                    const { error } = await supabase.functions.invoke(
+                      "reopen-accounting-period",
+                      { body: { type: "daily", periodId } }
+                    );
+                    if (error)
+                      return logAndThrow(
+                        "invoke reopen-accounting-period (daily)",
+                        error,
+                        { periodId }
+                      );
+                    showNotification("Journée réouverte.", "success");
+                    queryClient.invalidateQueries({
+                      queryKey: ["accountingPeriods"],
+                    });
+                  } catch (e: any) {
+                    showNotification(`Erreur: ${e.message}`, "error");
+                  }
+                }}
+                onCloseMonth={async (month: string) => {
+                  try {
+                    const { error } = await supabase.functions.invoke(
+                      "close-accounting-period",
+                      {
+                        body: { type: "monthly", periodIdentifier: { month } },
+                      }
+                    );
+                    if (error)
+                      return logAndThrow(
+                        "invoke close-accounting-period (monthly)",
+                        error,
+                        { month }
+                      );
+                    showNotification("Mois clôturé.", "success");
+                    queryClient.invalidateQueries({
+                      queryKey: ["accountingPeriods"],
+                    });
+                  } catch (e: any) {
+                    showNotification(`Erreur: ${e.message}`, "error");
+                  }
+                }}
+                onReopenMonth={async (periodId: string) => {
+                  try {
+                    const { error } = await supabase.functions.invoke(
+                      "reopen-accounting-period",
+                      { body: { type: "monthly", periodId } }
+                    );
+                    if (error)
+                      return logAndThrow(
+                        "invoke reopen-accounting-period (monthly)",
+                        error,
+                        { periodId }
+                      );
+                    showNotification("Mois réouvert.", "success");
+                    queryClient.invalidateQueries({
+                      queryKey: ["accountingPeriods"],
+                    });
+                  } catch (e: any) {
+                    showNotification(`Erreur: ${e.message}`, "error");
+                  }
+                }}
               />
             </ProtectedRoute>
           }
@@ -1086,10 +1850,198 @@ export const AppRouter = () => {
                 payments={payments as Payment[]}
                 officials={officials}
                 permissions={permissions}
-                onCreatePaymentBatch={() => {}}
+                onCreatePaymentBatch={async (
+                  paymentIds: string[],
+                  batchDetails: {
+                    batchReference: string;
+                    batchDate: string;
+                    debitAccountNumber: string;
+                  },
+                  ediFile?: { content: string; name: string }
+                ) => {
+                  try {
+                    const { data: period, error: perr } = await supabase
+                      .from("accounting_periods")
+                      .insert({
+                        type: "payment_batch",
+                        period_date: batchDetails.batchDate,
+                        status: "closed",
+                        closed_by: user?.id || null,
+                        closed_at: new Date().toISOString(),
+                      })
+                      .select()
+                      .single();
+                    if (perr)
+                      return logAndThrow("create payment batch period", perr, {
+                        batchDetails,
+                      });
+
+                    const total = (payments as Payment[])
+                      .filter((p) => paymentIds.includes(p.id))
+                      .reduce((s, p) => s + (p.total || 0), 0);
+
+                    const { error: berr } = await supabase
+                      .from("payment_batches")
+                      .insert({
+                        id: period.id,
+                        reference: batchDetails.batchReference,
+                        total_amount: total,
+                        payment_count: paymentIds.length,
+                        debit_account_number: batchDetails.debitAccountNumber,
+                      });
+                    if (berr)
+                      return logAndThrow("insert payment_batches", berr, {
+                        periodId: period.id,
+                      });
+
+                    const { data: assn, error: aerr } = await supabase
+                      .from("match_assignments")
+                      .select("match_id")
+                      .in("id", paymentIds);
+                    if (aerr)
+                      return logAndThrow(
+                        "select assignments for batch matches",
+                        aerr,
+                        { count: paymentIds.length }
+                      );
+                    const matchIds = Array.from(
+                      new Set((assn || []).map((a: any) => a.match_id))
+                    );
+                    if (matchIds.length > 0) {
+                      const { error: merr } = await supabase
+                        .from("matches")
+                        .update({
+                          accounting_status: "closed",
+                          accounting_period_id: period.id,
+                          updated_by: user?.id || null,
+                        })
+                        .in("id", matchIds);
+                      if (merr)
+                        return logAndThrow(
+                          "close matches for payment batch",
+                          merr,
+                          { periodId: period.id, count: matchIds.length }
+                        );
+                    }
+
+                    if (ediFile) {
+                      try {
+                        const blob = new Blob([ediFile.content], {
+                          type: "text/plain;charset=utf-8",
+                        });
+                        const link = document.createElement("a");
+                        link.href = URL.createObjectURL(blob);
+                        link.download = ediFile.name;
+                        document.body.appendChild(link);
+                        link.click();
+                        link.remove();
+                        URL.revokeObjectURL(link.href);
+                      } catch (_) {}
+                    }
+
+                    showNotification(
+                      "Lot de virement créé et clôturé.",
+                      "success"
+                    );
+                    queryClient.invalidateQueries({
+                      queryKey: ["accountingPeriods"],
+                    });
+                    queryClient.invalidateQueries({ queryKey: ["matches"] });
+                  } catch (e: any) {
+                    showNotification(`Erreur: ${e.message}`, "error");
+                  }
+                }}
                 accountingPeriods={accountingPeriods || []}
-                onCancelPaymentBatch={() => {}}
-                onSaveProofOfPayment={() => {}}
+                onCancelPaymentBatch={async (batchId: string) => {
+                  try {
+                    const { data: matchesToRevert, error: ferr } =
+                      await supabase
+                        .from("matches")
+                        .select("id")
+                        .eq("accounting_period_id", batchId);
+                    if (ferr)
+                      return logAndThrow(
+                        "fetch matches for batch cancel",
+                        ferr,
+                        { batchId }
+                      );
+                    const ids = (matchesToRevert || []).map((m: any) => m.id);
+                    if (ids.length > 0) {
+                      const { error: uerr } = await supabase
+                        .from("matches")
+                        .update({
+                          accounting_status: "validated",
+                          accounting_period_id: null,
+                          updated_by: user?.id || null,
+                        })
+                        .in("id", ids);
+                      if (uerr)
+                        return logAndThrow(
+                          "revert matches on batch cancel",
+                          uerr,
+                          { count: ids.length }
+                        );
+                    }
+                    const { error: perr2 } = await supabase
+                      .from("accounting_periods")
+                      .update({
+                        status: "open",
+                        reopened_by: user?.id || null,
+                        reopened_at: new Date().toISOString(),
+                      })
+                      .eq("id", batchId);
+                    if (perr2)
+                      return logAndThrow(
+                        "reopen accounting period (batch cancel)",
+                        perr2,
+                        { batchId }
+                      );
+                    showNotification("Lot de virement annulé.", "success");
+                    queryClient.invalidateQueries({
+                      queryKey: ["accountingPeriods"],
+                    });
+                  } catch (e: any) {
+                    showNotification(`Erreur: ${e.message}`, "error");
+                  }
+                }}
+                onSaveProofOfPayment={async (
+                  batchId: string,
+                  proof: { transactionId?: string; file?: File }
+                ) => {
+                  try {
+                    const update: any = { transaction_id: proof.transactionId };
+                    if (proof.file) {
+                      const filePath = `proofs/${batchId}/${proof.file.name}`;
+                      const { error: upErr } = await supabase.storage
+                        .from("payment_proofs")
+                        .upload(filePath, proof.file, { upsert: true });
+                      if (upErr)
+                        return logAndThrow("upload proof_of_payment", upErr, {
+                          batchId,
+                          filePath,
+                        });
+                      const { data: pub } = supabase.storage
+                        .from("payment_proofs")
+                        .getPublicUrl(filePath);
+                      update.proof_of_payment_url = pub.publicUrl;
+                      update.proof_of_payment_filename = proof.file.name;
+                    }
+                    const { error } = await supabase
+                      .from("payment_batches")
+                      .update(update)
+                      .eq("id", batchId);
+                    if (error)
+                      return logAndThrow("update payment_batches", error, {
+                        batchId,
+                      });
+                    showNotification("Preuve sauvegardée.", "success");
+                    queryClient.invalidateQueries({
+                      queryKey: ["accountingPeriods"],
+                    });
+                  } catch (e: any) {
+                    showNotification(`Erreur: ${e.message}`, "error");
+                  }
+                }}
                 users={users || []}
                 showNotification={showNotification}
               />
@@ -1153,18 +2105,375 @@ export const AppRouter = () => {
                 onRestoreTeam={onRestoreTeam}
                 onRestoreStadium={onRestoreStadium}
                 onRestoreMatch={onRestoreMatch}
-                onGenerateTemplate={() => {}}
-                onImportOfficials={async () => {}}
-                onImportTeams={async () => {}}
-                onImportStadiums={async () => {}}
-                onImportMatches={async () => {}}
-                onImportAssignments={async () => {}}
-                onImportOptimizedAssignments={async () => {}}
-                onLaunchOptimization={() => {}}
+                onGenerateTemplate={(headers, sheetName, fileName) =>
+                  generateTemplate(headers, sheetName, fileName)
+                }
+                onImportOfficials={async (data) => {
+                  try {
+                    const rows = data.map((o: any) => ({
+                      id: o.id,
+                      first_name: o.firstName,
+                      last_name: o.lastName,
+                      first_name_ar: o.firstNameAr ?? null,
+                      last_name_ar: o.lastNameAr ?? null,
+                      category: o.category,
+                      location_id: o.locationId ?? null,
+                      address: o.address ?? null,
+                      position: o.position ?? null,
+                      email: o.email ?? null,
+                      phone: o.phone ?? null,
+                      bank_account_number: o.bankAccountNumber ?? null,
+                      is_active: true,
+                      is_archived: false,
+                      created_by: user?.id || null,
+                      updated_by: user?.id || null,
+                    }));
+                    const { error } = await supabase
+                      .from("officials")
+                      .upsert(rows);
+                    if (error)
+                      return logAndThrow("import officials upsert", error, {
+                        count: rows.length,
+                      });
+                    showNotification(
+                      `${rows.length} officiels importés/synchronisés.`,
+                      "success"
+                    );
+                    queryClient.invalidateQueries({ queryKey: ["officials"] });
+                  } catch (e: any) {
+                    showNotification(
+                      `Erreur import officiels: ${e.message}`,
+                      "error"
+                    );
+                  }
+                }}
+                onImportTeams={async (data) => {
+                  const normalizeCode = (name: string) =>
+                    name
+                      .toUpperCase()
+                      .normalize("NFD")
+                      .replace(/[^A-Z0-9]+/g, "")
+                      .slice(0, 10);
+                  try {
+                    const rows = (data as any[]).map((t) => ({
+                      id: t.id,
+                      code: normalizeCode(t.name),
+                      name: t.name,
+                      full_name: t.fullName ?? null,
+                      logo_url: t.logoUrl ?? null,
+                      primary_color: t.primaryColor ?? null,
+                      secondary_color: t.secondaryColor ?? null,
+                      founded_year: t.foundedYear ?? null,
+                      created_by: user?.id || null,
+                      updated_by: user?.id || null,
+                    }));
+                    const { error } = await supabase.from("teams").upsert(rows);
+                    if (error)
+                      return logAndThrow("import teams upsert", error, {
+                        count: rows.length,
+                      });
+                    showNotification(
+                      `${rows.length} équipes importées/synchronisées.`,
+                      "success"
+                    );
+                    queryClient.invalidateQueries({ queryKey: ["teams"] });
+                  } catch (e: any) {
+                    showNotification(
+                      `Erreur import équipes: ${e.message}`,
+                      "error"
+                    );
+                  }
+                }}
+                onImportStadiums={async (data) => {
+                  try {
+                    const rows = (data as any[]).map((s) => ({
+                      id: s.id,
+                      name: s.name,
+                      location_id: s.locationId ?? null,
+                      created_by: user?.id || null,
+                      updated_by: user?.id || null,
+                    }));
+                    const { error } = await supabase
+                      .from("stadiums")
+                      .upsert(rows);
+                    if (error)
+                      return logAndThrow("import stadiums upsert", error, {
+                        count: rows.length,
+                      });
+                    showNotification(
+                      `${rows.length} stades importés/synchronisés.`,
+                      "success"
+                    );
+                    queryClient.invalidateQueries({ queryKey: ["stadiums"] });
+                  } catch (e: any) {
+                    showNotification(
+                      `Erreur import stades: ${e.message}`,
+                      "error"
+                    );
+                  }
+                }}
+                onImportMatches={async (data) => {
+                  try {
+                    const rows = (data as any[]).map((m) => ({
+                      id: m.id,
+                      season: m.season,
+                      game_day: m.gameDay,
+                      league_group_id: m.leagueGroup?.id,
+                      match_date: m.matchDate ?? null,
+                      match_time: m.matchTime ?? null,
+                      home_team_id: m.homeTeam?.id,
+                      away_team_id: m.awayTeam?.id,
+                      stadium_id: m.stadium?.id ?? null,
+                      status: "scheduled",
+                      has_unsent_changes: true,
+                      created_by: user?.id || null,
+                      updated_by: user?.id || null,
+                    }));
+                    const { error } = await supabase
+                      .from("matches")
+                      .upsert(rows);
+                    if (error)
+                      return logAndThrow("import matches upsert", error, {
+                        count: rows.length,
+                      });
+                    showNotification(
+                      `${rows.length} matchs importés/synchronisés.`,
+                      "success"
+                    );
+                    queryClient.invalidateQueries({ queryKey: ["matches"] });
+                  } catch (e: any) {
+                    showNotification(
+                      `Erreur import matchs: ${e.message}`,
+                      "error"
+                    );
+                  }
+                }}
+                onImportAssignments={async (data) => {
+                  try {
+                    const items = data as Array<{
+                      matchId: string;
+                      role: string;
+                      officialId: string;
+                    }>;
+                    const byMatch = new Map<string, typeof items>();
+                    items.forEach((it) => {
+                      const arr = byMatch.get(it.matchId) || [];
+                      arr.push(it);
+                      byMatch.set(it.matchId, arr);
+                    });
+                    for (const [matchId, arr] of byMatch.entries()) {
+                      const match = matches.find((m) => m.id === matchId);
+                      if (!match) continue;
+                      const existing = match.assignments;
+                      const updates: any[] = [];
+                      const inserts: any[] = [];
+                      for (const it of arr) {
+                        const slot = existing.find(
+                          (a) => a.role === it.role && !a.officialId
+                        );
+                        if (slot) {
+                          updates.push({
+                            id: slot.id,
+                            official_id: it.officialId,
+                            updated_by: user?.id || null,
+                          });
+                        } else {
+                          inserts.push({
+                            match_id: matchId,
+                            role: it.role,
+                            official_id: it.officialId,
+                            created_by: user?.id || null,
+                            updated_by: user?.id || null,
+                          });
+                        }
+                      }
+                      if (updates.length > 0) {
+                        const { error: uerr } = await supabase
+                          .from("match_assignments")
+                          .upsert(updates);
+                        if (uerr) throw uerr;
+                      }
+                      if (inserts.length > 0) {
+                        const { error: ierr } = await supabase
+                          .from("match_assignments")
+                          .insert(inserts);
+                        if (ierr) throw ierr;
+                      }
+                      const { error: matchUpdateErr } = await supabase
+                        .from("matches")
+                        .update({
+                          has_unsent_changes: true,
+                          updated_by: user?.id || null,
+                        })
+                        .eq("id", matchId);
+                      if (matchUpdateErr)
+                        return logAndThrow(
+                          "set match unsent after import assignments",
+                          matchUpdateErr,
+                          { matchId }
+                        );
+                    }
+                    showNotification("Désignations importées.", "success");
+                    queryClient.invalidateQueries({ queryKey: ["matches"] });
+                  } catch (e: any) {
+                    showNotification(
+                      `Erreur import désignations: ${e.message}`,
+                      "error"
+                    );
+                  }
+                }}
+                onImportOptimizedAssignments={async (data) => {
+                  try {
+                    // data: array of { match_id, official_id }
+                    const items = data as Array<{
+                      match_id: string;
+                      official_id: string;
+                    }>;
+                    const byMatch = new Map<
+                      string,
+                      Array<{ official_id: string }>
+                    >();
+                    items.forEach((it) => {
+                      const arr = byMatch.get(it.match_id) || [];
+                      arr.push({ official_id: it.official_id });
+                      byMatch.set(it.match_id, arr);
+                    });
+                    for (const [matchId, arr] of byMatch.entries()) {
+                      const match = matches.find((m) => m.id === matchId);
+                      if (!match) continue;
+                      const delegateSlots = match.assignments.filter((a) =>
+                        a.role.toLowerCase().includes("délégué")
+                      );
+                      let slotIdx = 0;
+                      const updates: any[] = [];
+                      const inserts: any[] = [];
+                      for (const it of arr) {
+                        let slot = delegateSlots.find(
+                          (s) =>
+                            !s.officialId && delegateSlots.indexOf(s) >= slotIdx
+                        );
+                        if (slot) {
+                          updates.push({
+                            id: slot.id,
+                            official_id: it.official_id,
+                            updated_by: user?.id || null,
+                          });
+                          slotIdx = delegateSlots.indexOf(slot) + 1;
+                        } else {
+                          inserts.push({
+                            match_id: matchId,
+                            role: delegateSlots[0]?.role || "Délégué",
+                            official_id: it.official_id,
+                            created_by: user?.id || null,
+                            updated_by: user?.id || null,
+                          });
+                        }
+                      }
+                      if (updates.length > 0) {
+                        const { error: uerr } = await supabase
+                          .from("match_assignments")
+                          .upsert(updates);
+                        if (uerr) throw uerr;
+                      }
+                      if (inserts.length > 0) {
+                        const { error: ierr } = await supabase
+                          .from("match_assignments")
+                          .insert(inserts);
+                        if (ierr) throw ierr;
+                      }
+                      const { error: matchUpdateErr } = await supabase
+                        .from("matches")
+                        .update({
+                          has_unsent_changes: true,
+                          updated_by: user?.id || null,
+                        })
+                        .eq("id", matchId);
+                      if (matchUpdateErr)
+                        return logAndThrow(
+                          "set match unsent after import optimized",
+                          matchUpdateErr,
+                          { matchId }
+                        );
+                    }
+                    showNotification(
+                      "Désignations (optimisées) importées.",
+                      "success"
+                    );
+                    queryClient.invalidateQueries({ queryKey: ["matches"] });
+                  } catch (e: any) {
+                    showNotification(
+                      `Erreur import optimisation: ${e.message}`,
+                      "error"
+                    );
+                  }
+                }}
+                onLaunchOptimization={async (scope) => {
+                  try {
+                    const scopeSet = new Set(scope.leagueGroupIds);
+                    const daysSet = new Set(scope.gameDays);
+                    const matchesInScope = matches.filter(
+                      (m) =>
+                        scopeSet.has(m.leagueGroup.id) && daysSet.has(m.gameDay)
+                    );
+                    if (matchesInScope.length === 0) {
+                      showNotification(
+                        "Aucun match dans le périmètre.",
+                        "error"
+                      );
+                      return;
+                    }
+                    const csvs: Record<string, string> = {
+                      officials: generateOfficialsCsv(
+                        officials,
+                        settings?.locations || [],
+                        settings?.optimization_settings || {
+                          travelSpeedKmph: 70,
+                          bufferMin: 30,
+                          matchDurationMin: 120,
+                          defaultMatchRisk: 1,
+                          categoryGradeMap: {},
+                          categoryCapacityMap: {},
+                        },
+                        matchesInScope
+                      ),
+                      matches: generateMatchesCsv(
+                        matchesInScope,
+                        settings?.locations || [],
+                        settings?.optimization_settings || {
+                          travelSpeedKmph: 70,
+                          bufferMin: 30,
+                          matchDurationMin: 120,
+                          defaultMatchRisk: 1,
+                          categoryGradeMap: {},
+                          categoryCapacityMap: {},
+                        }
+                      ),
+                      stadiums: generateStadiumsCsv(
+                        stadiums,
+                        settings?.locations || []
+                      ),
+                      availability: generateAvailabilityCsv(
+                        officials,
+                        matchesInScope
+                      ),
+                      forbidden: generateForbiddenCsv(),
+                    };
+                    await downloadOptimizationDataAsZip(csvs);
+                    showNotification(
+                      "Données d'optimisation exportées.",
+                      "success"
+                    );
+                  } catch (e: any) {
+                    showNotification(
+                      `Erreur export optimisation: ${e.message}`,
+                      "error"
+                    );
+                  }
+                }}
                 currentUser={user!}
                 permissions={permissions}
-                isDirty={false}
-                setIsDirty={() => {}}
+                isDirty={settingsDirty}
+                setIsDirty={setSettingsDirty}
               />
             </ProtectedRoute>
           }

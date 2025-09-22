@@ -1,6 +1,7 @@
 // hooks/useSanctions.ts
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../lib/supabaseClient';
+import { logAndThrow } from '../utils/logging';
 
 const SANCTIONS_KEY = 'sanctions';
 
@@ -34,7 +35,7 @@ export function useSanctions(options: {
             }
 
             const { data, error } = await query;
-            if (error) throw error;
+            if (error) return logAndThrow('fetch sanctions', error, { options });
             return data || [];
         },
         enabled: options.enabled !== false,
@@ -52,7 +53,7 @@ export function useCreateSanction() {
                 .select()
                 .single();
 
-            if (error) throw error;
+            if (error) return logAndThrow('create sanction', error, { sanction });
             return data;
         },
         onSuccess: () => {

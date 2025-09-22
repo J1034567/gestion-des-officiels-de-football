@@ -1,6 +1,7 @@
 // hooks/useAuditLogs.ts
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '../lib/supabaseClient';
+import { logAndThrow } from '../utils/logging';
 import { QueryOptions, PaginatedResponse } from '../types/query.types.ts';
 import { AuditLog } from '../types';
 
@@ -20,7 +21,7 @@ export function useAuditLogs(options: QueryOptions = {}) {
                 .range(from, to);
 
             const { data, error, count } = await query;
-            if (error) throw error;
+            if (error) return logAndThrow('fetch audit_logs', error, { page, pageSize });
 
             const mapped: AuditLog[] = (data || []).map((r: any) => ({
                 id: r.id,

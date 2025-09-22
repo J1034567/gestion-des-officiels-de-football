@@ -4,6 +4,7 @@ import { Stadium } from '../types';
 import { SupabaseQueryBuilder } from '../lib/supabaseQueryBuilder.ts';
 import { QueryOptions, PaginatedResponse } from '../types/query.types.ts';
 import { supabase } from '../lib/supabaseClient';
+import { logAndThrow } from '../utils/logging';
 import { mapStadium } from '../lib/mappers';
 
 const STADIUMS_QUERY_KEY = 'stadiums';
@@ -12,15 +13,15 @@ export function useStadiums(options: QueryOptions = {}) {
     return useQuery<PaginatedResponse<Stadium>>({
         queryKey: [STADIUMS_QUERY_KEY, options],
         queryFn: async () => {
+            const { filters: rawFilters, ...restOptions } = options as any;
+            const { includeArchived, ...forwardFilters } = (rawFilters || {}) as any;
+            const finalFilters = includeArchived ? forwardFilters : { isArchived: (forwardFilters as any)?.isArchived ?? false, ...forwardFilters };
             const resp = await SupabaseQueryBuilder.executePaginatedQuery<any>(
                 'stadiums',
                 '*',
                 {
-                    ...options,
-                    filters: {
-                        ...options.filters,
-                        isArchived: false,
-                    },
+                    ...(restOptions as any),
+                    filters: finalFilters,
                 }
             );
             const data = (resp.data || []).map(mapStadium);
@@ -37,7 +38,7 @@ export function useCreateStadium() {
     return useMutation({
         mutationFn: async (stadium: Partial<Stadium>) => {
             const { data, error } = await supabase.from('stadiums').insert(stadium).select().single();
-            if (error) throw error;
+            if (error) return logAndThrow('create stadium', error, { stadium });
             return data;
         },
         onSuccess: () => queryClient.invalidateQueries({ queryKey: ['stadiums'] }),
@@ -51,7 +52,7 @@ export function useUpdateStadium() {
     return useMutation<Stadium, Error, Partial<Stadium> & { id: string }>({
         mutationFn: async ({ id, ...updates }: Partial<Stadium> & { id: string }) => {
             const { data, error } = await supabase.from('stadiums').update(updates).eq('id', id).select().single();
-            if (error) throw error;
+            if (error) return logAndThrow('update stadium', error, { id, updates });
             return data;
         },
         onSuccess: (data) => {

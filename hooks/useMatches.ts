@@ -4,6 +4,7 @@ import { Match } from '../types';
 import { SupabaseQueryBuilder } from '../lib/supabaseQueryBuilder.ts';
 import { QueryOptions, PaginatedResponse } from '../types/query.types.ts';
 import { supabase } from '../lib/supabaseClient';
+import { logAndThrow } from '../utils/logging';
 import { mapMatch } from '../lib/mappers';
 
 const MATCHES_QUERY_KEY = 'matches';
@@ -57,7 +58,7 @@ export function useMatch(id: string) {
                 .eq('id', id)
                 .single();
 
-            if (error) throw error;
+            if (error) return logAndThrow('fetch match by id', error, { id });
             return mapMatch(data)!;
         },
         enabled: !!id,
@@ -75,7 +76,7 @@ export function useCreateMatch() {
                 .select()
                 .single();
 
-            if (error) throw error;
+            if (error) return logAndThrow('create match', error, { match });
             return data;
         },
         onSuccess: () => {
@@ -96,7 +97,7 @@ export function useUpdateMatch() {
                 .select()
                 .single();
 
-            if (error) throw error;
+            if (error) return logAndThrow('update match', error, { id, updates });
             return data;
         },
         onSuccess: (data) => {
@@ -116,7 +117,7 @@ export function useBulkUpdateMatchSchedule() {
                 .in('id', matchIds)
                 .select();
 
-            if (error) throw error;
+            if (error) return logAndThrow('bulk update match schedule', error, { matchIds, matchDate, matchTime });
             return data;
         },
         onSuccess: () => {
@@ -135,7 +136,7 @@ export function useArchiveMatch() {
                 .eq('id', matchId)
                 .select();
 
-            if (error) throw error;
+            if (error) return logAndThrow('archive match', error, { matchId });
             return data;
         },
         onSuccess: () => {

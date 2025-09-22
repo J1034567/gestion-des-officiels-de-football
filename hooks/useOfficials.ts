@@ -4,6 +4,7 @@ import { Official } from '../types';
 import { SupabaseQueryBuilder } from '../lib/supabaseQueryBuilder.ts';
 import { QueryOptions, PaginatedResponse } from '../types/query.types.ts';
 import { supabase } from '../lib/supabaseClient';
+import { logAndThrow } from '../utils/logging';
 import { mapOfficial } from '../lib/mappers';
 
 const OFFICIALS_QUERY_KEY = 'officials';
@@ -12,6 +13,10 @@ export function useOfficials(options: QueryOptions = {}) {
     return useQuery<PaginatedResponse<Official>>({
         queryKey: [OFFICIALS_QUERY_KEY, options],
         queryFn: async () => {
+            const { filters: rawFilters, ...restOptions } = options as any;
+            const { includeArchived, ...forwardFilters } = (rawFilters || {}) as any;
+            // By default return only non-archived, unless includeArchived is true or explicit isArchived provided
+            const finalFilters = includeArchived ? forwardFilters : { isArchived: (forwardFilters as any)?.isArchived ?? false, ...forwardFilters };
             const resp = await SupabaseQueryBuilder.executePaginatedQuery<any>(
                 'officials',
                 `
@@ -19,11 +24,8 @@ export function useOfficials(options: QueryOptions = {}) {
                       unavailabilities:official_unavailabilities(*)
                     `,
                 {
-                    ...options,
-                    filters: {
-                        ...options.filters,
-                        isArchived: false, // Default to non-archived
-                    },
+                    ...(restOptions as any),
+                    filters: finalFilters,
                 }
             );
             const data = (resp.data || []).map(mapOfficial);
@@ -47,7 +49,7 @@ export function useOfficial(id: string) {
                 .eq('id', id)
                 .single();
 
-            if (error) throw error;
+            if (error) return logAndThrow('fetch official by id', error, { id });
             return mapOfficial(data);
         },
         enabled: !!id,
@@ -65,7 +67,7 @@ export function useCreateOfficial() {
                 .select()
                 .single();
 
-            if (error) throw error;
+            if (error) return logAndThrow('create official', error, { official });
             return data;
         },
         onSuccess: () => {
@@ -86,7 +88,7 @@ export function useUpdateOfficial() {
                 .select()
                 .single();
 
-            if (error) throw error;
+            if (error) return logAndThrow('update official', error, { id, updates });
             return data;
         },
         onSuccess: (data) => {

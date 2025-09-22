@@ -1,6 +1,7 @@
 // hooks/useAppSettings.ts
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '../lib/supabaseClient';
+import { logAndThrow } from '../utils/logging';
 
 export function useAppSettings() {
     return useQuery({
@@ -12,11 +13,7 @@ export function useAppSettings() {
                 .eq('is_active', true)
                 .maybeSingle(); // Use maybeSingle() to avoid errors if no row is found
 
-            if (error) {
-                // It's good practice to log the specific error
-                console.error("Error fetching app_settings_versions:", error);
-                throw error;
-            }
+            if (error) return logAndThrow('fetch app_settings_versions', error);
 
             // Also fetch locations
             const { data: locations, error: locationsError } = await supabase
@@ -24,10 +21,7 @@ export function useAppSettings() {
                 .select('id, wilaya, dairas, communes, latitude, longitude, wilaya_ar, daira_ar, commune_ar')
                 .limit(3000);
 
-            if (locationsError) {
-                console.error("Error fetching locations:", locationsError);
-                throw locationsError;
-            }
+            if (locationsError) return logAndThrow('fetch locations', locationsError);
 
             return {
                 ...data,

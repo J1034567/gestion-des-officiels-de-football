@@ -1,6 +1,7 @@
 // hooks/useLeagues.ts
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../lib/supabaseClient';
+import { logAndThrow } from '../utils/logging';
 import { League } from '../types';
 
 const LEAGUES_KEY = 'leagues';
@@ -15,7 +16,7 @@ export function useLeagues(options: { enabled?: boolean } = {}) {
                 .order('level', { ascending: true })
                 .order('name', { ascending: true });
 
-            if (error) throw error;
+            if (error) return logAndThrow('fetch leagues', error);
             return data || [];
         },
         enabled: options.enabled !== false,
@@ -34,7 +35,7 @@ export function useCreateLeague() {
                 .select()
                 .single();
 
-            if (error) throw error;
+            if (error) return logAndThrow('create league', error, { league });
             return data;
         },
         onSuccess: () => {

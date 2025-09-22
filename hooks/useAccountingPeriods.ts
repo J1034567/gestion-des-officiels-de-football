@@ -1,6 +1,7 @@
 // hooks/useAccountingPeriods.ts
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../lib/supabaseClient';
+import { logAndThrow } from '../utils/logging';
 
 const ACCOUNTING_PERIODS_KEY = 'accountingPeriods';
 
@@ -31,7 +32,7 @@ export function useAccountingPeriods(options: {
             }
 
             const { data, error } = await query;
-            if (error) throw error;
+            if (error) return logAndThrow('fetch accounting_periods', error, { options });
             return data || [];
         },
         enabled: options.enabled !== false,
@@ -47,7 +48,7 @@ export function useCloseAccountingPeriod() {
                 body: { type, periodIdentifier }
             });
 
-            if (error) throw error;
+            if (error) return logAndThrow('close-accounting-period', error, { type, periodIdentifier });
             return data;
         },
         onSuccess: () => {

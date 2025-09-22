@@ -1,6 +1,7 @@
 // hooks/useCurrentUser.ts
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '../lib/supabaseClient';
+import { logAndThrow } from '../utils/logging';
 import { User, mapDbRoleToEnum } from '../types';
 
 export function useCurrentUser(userId?: string) {
@@ -15,7 +16,7 @@ export function useCurrentUser(userId?: string) {
                 .eq('id', userId)
                 .single();
 
-            if (profileError) throw profileError;
+            if (profileError) return logAndThrow('fetch current user profile', profileError, { userId });
 
             const { data: roleData } = await supabase
                 .from('user_roles')

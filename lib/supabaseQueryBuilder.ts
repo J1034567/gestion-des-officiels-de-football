@@ -1,5 +1,6 @@
 // lib/supabaseQueryBuilder.ts
 import { supabase } from './supabaseClient';
+import { logAndThrow } from '../utils/logging';
 
 // Define the structure for pagination and filtering options
 export interface QueryOptions {
@@ -99,13 +100,7 @@ export class SupabaseQueryBuilder {
         const { data, error, count } = await query;
 
         if (error) {
-            console.error('Supabase query error:', {
-                message: error.message,
-                details: error.details,
-                hint: error.hint,
-                code: error.code
-            });
-            throw error;
+            return logAndThrow('executePaginatedQuery', error, { tableName, selectQuery, options });
         }
 
         const { page = 1, pageSize = 25 } = options.pagination || {};

@@ -2,6 +2,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '../lib/supabaseClient';
 import { User, mapDbRoleToEnum } from '../types';
+import { logAndThrow } from '../utils/logging';
 
 export function useUsers() {
     return useQuery<User[]>({
@@ -11,13 +12,13 @@ export function useUsers() {
                 .from('profiles')
                 .select('id, full_name, avatar_url, team_id, email');
 
-            if (profileError) throw profileError;
+            if (profileError) return logAndThrow('fetch profiles', profileError);
 
             const { data: roles, error: rolesError } = await supabase
                 .from('user_roles')
                 .select('user_id, roles(name)');
 
-            if (rolesError) throw rolesError;
+            if (rolesError) return logAndThrow('fetch user_roles', rolesError);
 
             const rolesMap = new Map(roles.map((r: any) => [r.user_id, r.roles?.name]));
 

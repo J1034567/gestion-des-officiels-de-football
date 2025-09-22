@@ -12,6 +12,9 @@ export function useTeams(options: QueryOptions = {}) {
     return useQuery<PaginatedResponse<Team>>({
         queryKey: [TEAMS_QUERY_KEY, options],
         queryFn: async () => {
+            const { filters: rawFilters, ...restOptions } = options as any;
+            const { includeArchived, ...forwardFilters } = (rawFilters || {}) as any;
+            const finalFilters = includeArchived ? forwardFilters : { isArchived: (forwardFilters as any)?.isArchived ?? false, ...forwardFilters };
             const resp = await SupabaseQueryBuilder.executePaginatedQuery<any>(
                 'teams',
                 `
@@ -20,11 +23,8 @@ export function useTeams(options: QueryOptions = {}) {
           awayMatches:matches!matches_away_team_id_fkey(count)
         `,
                 {
-                    ...options,
-                    filters: {
-                        ...options.filters,
-                        isArchived: false,
-                    },
+                    ...(restOptions as any),
+                    filters: finalFilters,
                 }
             );
             const data = (resp.data || []).map(mapTeam);
