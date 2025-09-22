@@ -1,18 +1,19 @@
-
 import React from "react";
 import Auth from "./components/Auth";
-import Toast from "./components/Toast";
-import { useNotification } from "./hooks/useNotification";
+import {
+  NotificationProvider,
+  NotificationToaster,
+} from "./contexts/NotificationContext";
 import { AppRouter } from "./components/AppRouter";
 import { useAuth } from "./contexts/AuthContext";
 import VerificationPage from "./components/VerificationPage";
 
 const App: React.FC = () => {
   const { session, isLoading } = useAuth();
-  const [notification, , closeNotification] = useNotification();
+  // Notifications handled via global NotificationProvider
 
   const isVerificationPage = React.useMemo(() => {
-    return window.location.hash.startsWith('#/verify/');
+    return window.location.hash.startsWith("#/verify/");
   }, []);
 
   if (isVerificationPage) {
@@ -28,10 +29,12 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-gray-900">
-      {notification && <Toast notification={notification} onClose={closeNotification} />}
-      {!session ? <Auth /> : <AppRouter />}
-    </div>
+    <NotificationProvider>
+      <div className="min-h-screen bg-gray-900">
+        <NotificationToaster />
+        {!session ? <Auth /> : <AppRouter />}
+      </div>
+    </NotificationProvider>
   );
 };
 

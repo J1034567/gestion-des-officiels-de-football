@@ -13,7 +13,8 @@ import TableCellsIcon from "./icons/TableCellsIcon";
 import { useAuth } from "../contexts/AuthContext";
 import { supabase } from "../lib/supabaseClient";
 import { logAndThrow } from "../utils/logging";
-import { useNotification } from "../hooks/useNotification";
+import { useNotificationContext } from "../contexts/NotificationContext";
+import { makeNotifier } from "../utils/notify";
 
 interface HeaderProps {
   seasons: string[];
@@ -47,19 +48,20 @@ const Header: React.FC<HeaderProps> = ({
 }) => {
   const { user, permissions } = useAuth();
   const location = useLocation();
-  const [, showNotification] = useNotification();
+  const { showNotification } = useNotificationContext();
+  const notify = makeNotifier(showNotification);
 
   const handleLogout = async () => {
     try {
       const { error } = await supabase.auth.signOut();
       if (error) {
-        showNotification(`Erreur déconnexion: ${error.message}`, "error");
+        notify.error(`Erreur déconnexion: ${error.message}`);
         return logAndThrow("auth.signOut", error);
       }
-      showNotification("Déconnexion réussie.", "success");
+      notify.success("Déconnexion réussie.");
     } catch (e) {
       // Routing will handle session loss anyway; just log
-      showNotification((e as any)?.message || String(e), "error");
+      notify.error((e as any)?.message || String(e));
     }
   };
 

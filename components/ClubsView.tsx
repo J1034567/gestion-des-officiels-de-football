@@ -1,4 +1,6 @@
-import React, { useState, useMemo, useCallback } from "react";
+import React, { useState, useMemo, useCallback, useRef } from "react";
+import { useDebounce } from "../hooks/useDebounce";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   Team,
   Stadium,
@@ -54,6 +56,71 @@ interface TeamStructure {
   };
 }
 
+const VirtualStadiumList: React.FC<{
+  stadiums: Stadium[];
+  canArchive: boolean;
+  onEdit: (stadium: Stadium) => void;
+  onArchive: (stadium: Stadium) => void;
+  formatLocation: (locationId: string | null) => string;
+}> = ({ stadiums, canArchive, onEdit, onArchive, formatLocation }) => {
+  const parentRef = useRef<HTMLDivElement | null>(null);
+  const rowVirtualizer = useVirtualizer({
+    count: stadiums.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 60,
+    overscan: 8,
+  });
+
+  if (stadiums.length === 0) {
+    return <div className="text-center py-4 text-gray-400">Aucun stade</div>;
+  }
+
+  return (
+    <div
+      ref={parentRef}
+      className="h-[400px] overflow-auto rounded-md bg-transparent"
+    >
+      <div
+        style={{ height: rowVirtualizer.getTotalSize() }}
+        className="relative"
+      >
+        {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+          const stadium = stadiums[virtualRow.index];
+          return (
+            <div
+              key={stadium.id}
+              className="absolute top-0 left-0 w-full"
+              style={{ transform: `translateY(${virtualRow.start}px)` }}
+            >
+              <div className="p-2 flex items-center justify-between bg-gray-900/50 hover:bg-gray-900 rounded-md mb-2">
+                <div
+                  className="flex-grow cursor-pointer"
+                  onClick={() => onEdit(stadium)}
+                >
+                  <p className="font-medium text-white">{stadium.name}</p>
+                  <p className="text-sm text-gray-400">
+                    {formatLocation(stadium.locationId)}
+                  </p>
+                </div>
+                <div className="flex-shrink-0">
+                  {canArchive && (
+                    <button
+                      onClick={() => onArchive(stadium)}
+                      className="text-red-400 hover:text-red-300 p-2 rounded-full hover:bg-gray-700 transition-colors"
+                    >
+                      <TrashIcon className="h-4 w-4" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
 const ClubsView: React.FC<ClubsViewProps> = (props) => {
   const {
     teams,
@@ -82,7 +149,9 @@ const ClubsView: React.FC<ClubsViewProps> = (props) => {
     item: Team | Stadium;
   } | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
+  const debouncedTeamSearch = useDebounce(searchTerm, 300);
   const [stadiumSearchTerm, setStadiumSearchTerm] = useState("");
+  const debouncedStadiumSearch = useDebounce(stadiumSearchTerm, 300);
   const [expandedLeagues, setExpandedLeagues] = useState<
     Record<string, boolean>
   >({});
@@ -198,7 +267,9 @@ const ClubsView: React.FC<ClubsViewProps> = (props) => {
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "");
 
-    const searchKeywords = normalize(searchTerm).split(" ").filter(Boolean);
+    const searchKeywords = normalize(debouncedTeamSearch)
+      .split(" ")
+      .filter(Boolean);
 
     if (searchKeywords.length === 0) return teamStructure;
 
@@ -231,7 +302,7 @@ const ClubsView: React.FC<ClubsViewProps> = (props) => {
       }
     }
     return newStructure;
-  }, [teamStructure, searchTerm]);
+  }, [teamStructure, debouncedTeamSearch]);
 
   const filteredUnassignedTeams = useMemo(() => {
     const normalize = (str: string | null | undefined): string =>
@@ -240,7 +311,9 @@ const ClubsView: React.FC<ClubsViewProps> = (props) => {
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "");
 
-    const searchKeywords = normalize(searchTerm).split(" ").filter(Boolean);
+    const searchKeywords = normalize(debouncedTeamSearch)
+      .split(" ")
+      .filter(Boolean);
     if (searchKeywords.length === 0) return unassignedTeams;
 
     return unassignedTeams.filter((t) => {
@@ -251,7 +324,7 @@ const ClubsView: React.FC<ClubsViewProps> = (props) => {
         searchableText.includes(keyword)
       );
     });
-  }, [unassignedTeams, searchTerm]);
+  }, [unassignedTeams, debouncedTeamSearch]);
 
   const sortedLeagueIds = useMemo(
     () =>
@@ -300,7 +373,7 @@ const ClubsView: React.FC<ClubsViewProps> = (props) => {
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "");
 
-    const searchKeywords = normalize(stadiumSearchTerm)
+    const searchKeywords = normalize(debouncedStadiumSearch)
       .split(" ")
       .filter(Boolean);
 
@@ -318,7 +391,7 @@ const ClubsView: React.FC<ClubsViewProps> = (props) => {
           searchableText.includes(keyword)
         );
       });
-  }, [stadiums, stadiumSearchTerm, formatLocation]);
+  }, [stadiums, debouncedStadiumSearch, formatLocation]);
 
   const groupedStadiums = useMemo(() => {
     return filteredStadiums.reduce((acc, stadium) => {
@@ -711,41 +784,15 @@ const ClubsView: React.FC<ClubsViewProps> = (props) => {
                     </button>
                     {isExpanded && (
                       <div className="p-4">
-                        <ul className="space-y-2">
-                          {stadiumsInWilaya.map((stadium) => (
-                            <li
-                              key={stadium.id}
-                              className="p-2 flex items-center justify-between bg-gray-900/50 hover:bg-gray-900 rounded-md"
-                            >
-                              <div
-                                className="flex-grow cursor-pointer"
-                                onClick={() => handleEditStadium(stadium)}
-                              >
-                                <p className="font-medium text-white">
-                                  {stadium.name}
-                                </p>
-                                <p className="text-sm text-gray-400">
-                                  {formatLocation(stadium.locationId)}
-                                </p>
-                              </div>
-                              <div className="flex-shrink-0">
-                                {canArchive && (
-                                  <button
-                                    onClick={() =>
-                                      setItemToArchive({
-                                        type: "stadium",
-                                        item: stadium,
-                                      })
-                                    }
-                                    className="text-red-400 hover:text-red-300 p-2 rounded-full hover:bg-gray-700 transition-colors"
-                                  >
-                                    <TrashIcon className="h-4 w-4" />
-                                  </button>
-                                )}
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
+                        <VirtualStadiumList
+                          stadiums={stadiumsInWilaya}
+                          canArchive={canArchive}
+                          onEdit={handleEditStadium}
+                          onArchive={(stadium) =>
+                            setItemToArchive({ type: "stadium", item: stadium })
+                          }
+                          formatLocation={formatLocation}
+                        />
                       </div>
                     )}
                   </div>

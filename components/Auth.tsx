@@ -2,8 +2,8 @@ import React, { useState } from "react";
 import { supabase } from "../lib/supabaseClient";
 import { logAndThrow } from "../utils/logging";
 import WhistleIcon from "./icons/WhistleIcon";
-import { useNotification } from "../hooks/useNotification";
-import Toast from "./Toast";
+import { useNotificationContext } from "../contexts/NotificationContext";
+import { makeNotifier } from "../utils/notify";
 
 const Auth: React.FC = () => {
   const [loading, setLoading] = useState(false);
@@ -11,7 +11,8 @@ const Auth: React.FC = () => {
   const [password, setPassword] = useState("");
   const [fullName, setFullName] = useState("");
   const [view, setView] = useState<"login" | "signup" | "recovery">("login");
-  const [notification, showNotification, closeNotification] = useNotification();
+  const { showNotification } = useNotificationContext();
+  const notify = makeNotifier(showNotification);
 
   const handleAuth = async () => {
     setLoading(true);
@@ -24,19 +25,17 @@ const Auth: React.FC = () => {
         });
         if (error) return logAndThrow("auth.signUp", error, { email });
         if (data.user?.identities?.length === 0) {
-          showNotification(
-            "Inscription impossible, l'utilisateur existe peut-être déjà.",
-            "error"
+          notify.error(
+            "Inscription impossible, l'utilisateur existe peut-être déjà."
           );
         } else {
-          showNotification(
-            "Inscription réussie ! Veuillez vérifier votre e-mail pour confirmer votre compte.",
-            "success"
+          notify.success(
+            "Inscription réussie ! Veuillez vérifier votre e-mail pour confirmer votre compte."
           );
           setView("login");
         }
       } catch (e: any) {
-        showNotification(e.message || String(e), "error");
+        notify.error(e.message || String(e));
       }
     } else {
       // 'login' view
@@ -47,9 +46,9 @@ const Auth: React.FC = () => {
         });
         if (error)
           return logAndThrow("auth.signInWithPassword", error, { email });
-        showNotification("Connexion réussie.", "success");
+        notify.success("Connexion réussie.");
       } catch (e: any) {
-        showNotification(e.message || String(e), "error");
+        notify.error(e.message || String(e));
       }
     }
     setLoading(false);
@@ -63,13 +62,12 @@ const Auth: React.FC = () => {
       });
       if (error)
         return logAndThrow("auth.resetPasswordForEmail", error, { email });
-      showNotification(
-        "Si un compte existe pour cet e-mail, un lien de réinitialisation a été envoyé.",
-        "success"
+      notify.success(
+        "Si un compte existe pour cet e-mail, un lien de réinitialisation a été envoyé."
       );
       setView("login");
     } catch (e: any) {
-      showNotification(e.message || String(e), "error");
+      notify.error(e.message || String(e));
     }
     setLoading(false);
   };
@@ -97,9 +95,6 @@ const Auth: React.FC = () => {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-900 p-4">
-      {notification && (
-        <Toast notification={notification} onClose={closeNotification} />
-      )}
       <div className="w-full max-w-md bg-gray-800 rounded-xl shadow-2xl p-8 space-y-6">
         <div className="flex flex-col items-center space-y-2">
           <WhistleIcon className="h-12 w-12 text-brand-primary" />

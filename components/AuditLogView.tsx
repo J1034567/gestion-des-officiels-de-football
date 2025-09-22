@@ -20,6 +20,75 @@ const AuditLogView: React.FC<AuditLogViewProps> = ({ logs, isLoading }) => {
 
   const toggle = (id: string) => setExpanded((e) => ({ ...e, [id]: !e[id] }));
 
+  const inferAction = (log: AuditLog): string => {
+    const raw = (log.action || "").toLowerCase();
+    if (raw !== "update" && raw !== "insert" && raw !== "delete")
+      return log.action;
+
+    const table = (log.tableName || "").toLowerCase();
+    const oldV = (log.oldValues as any) || {};
+    const newV = (log.newValues as any) || {};
+    const isChanged = (k: string) => oldV[k] !== newV[k];
+    const changedKeys = Array.from(
+      new Set(Object.keys({ ...oldV, ...newV })).values()
+    ).filter(isChanged);
+
+    const labelForMatch = () => {
+      if (
+        changedKeys.includes("match_date") ||
+        changedKeys.includes("match_time")
+      )
+        return "Mise à jour Date/Heure du match";
+      if (changedKeys.includes("stadium_id")) return "Changement de stade";
+      if (changedKeys.includes("accounting_status"))
+        return `Changement statut comptable: ${oldV.accounting_status} → ${newV.accounting_status}`;
+      if (changedKeys.includes("status"))
+        return `Changement statut du match: ${oldV.status} → ${newV.status}`;
+      if (changedKeys.includes("is_archived"))
+        return newV.is_archived
+          ? "Archivage du match"
+          : "Restauration du match";
+      return "Mise à jour du match";
+    };
+
+    const labelForAssignment = () => {
+      if (changedKeys.includes("official_id"))
+        return "Mise à jour de désignation";
+      if (changedKeys.includes("notes"))
+        return "Mise à jour des notes de paiement";
+      return "Mise à jour de désignation";
+    };
+
+    const labelForTeams = () =>
+      changedKeys.includes("is_archived")
+        ? newV.is_archived
+          ? "Archivage équipe"
+          : "Restauration équipe"
+        : "Mise à jour équipe";
+    const labelForStadiums = () =>
+      changedKeys.includes("is_archived")
+        ? newV.is_archived
+          ? "Archivage stade"
+          : "Restauration stade"
+        : "Mise à jour stade";
+    const labelForOfficials = () =>
+      changedKeys.includes("is_archived")
+        ? newV.is_archived
+          ? "Archivage officiel"
+          : "Restauration officiel"
+        : "Mise à jour officiel";
+
+    if (table === "matches") return labelForMatch();
+    if (table === "match_assignments") return labelForAssignment();
+    if (table === "teams") return labelForTeams();
+    if (table === "stadiums") return labelForStadiums();
+    if (table === "officials") return labelForOfficials();
+
+    if (raw === "insert") return `Création dans ${log.tableName || "table"}`;
+    if (raw === "delete") return `Suppression dans ${log.tableName || "table"}`;
+    return `Mise à jour dans ${log.tableName || "table"}`;
+  };
+
   return (
     <main className="px-4 sm:px-6 lg:px-8 py-8">
       <div className="flex items-center mb-6">
@@ -82,7 +151,7 @@ const AuditLogView: React.FC<AuditLogViewProps> = ({ logs, isLoading }) => {
                       </div>
                     </td>
                     <td className="px-6 py-4 text-sm text-gray-300">
-                      {log.action}
+                      {inferAction(log)}
                     </td>
                     <td className="px-6 py-4 text-sm text-gray-300">
                       <div className="space-y-1">
