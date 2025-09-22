@@ -1,0 +1,5 @@
+{
+  "name": "Gestion des Officiels de Football",
+  "description": "Une application web pour gérer les arbitres, les délégués et leurs indemnités pour une ligue de football inter-régions. Ce MVP se concentre sur la désignation des officiels pour les matchs.",
+  "requestFramePermissions": []
+}
