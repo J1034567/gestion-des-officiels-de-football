@@ -1,4 +1,5 @@
-import * as XLSX from 'xlsx';
+let xlsxPromise: Promise<typeof import('xlsx')> | null = null;
+const getXLSX = () => (xlsxPromise ||= import('xlsx'));
 import { Payment, User, Match, Official, MatchStatus, AccountingStatus, Official as OfficialType } from '../types';
 
 const accountingStatusToText: Record<AccountingStatus, string> = {
@@ -9,7 +10,11 @@ const accountingStatusToText: Record<AccountingStatus, string> = {
     [AccountingStatus.CLOSED]: 'Payé et Clôturé',
 };
 
-export const exportPaymentsToExcel = (payments: Payment[], users: User[]): { success: boolean; error?: string } => {
+export const exportPaymentsToExcel = async (
+    payments: Payment[],
+    users: User[]
+): Promise<{ success: boolean; error?: string }> => {
+    const XLSX = await getXLSX();
     const userMap = new Map(users.map(u => [u.id, u.full_name]));
 
     const dataToExport = payments.map(p => {
@@ -53,22 +58,23 @@ export const exportPaymentsToExcel = (payments: Payment[], users: User[]): { suc
 };
 
 export const generateTemplate = (headers: string[], sheetName: string, fileName: string) => {
-    // Create a worksheet with only the headers
-    const ws = XLSX.utils.aoa_to_sheet([headers]);
-    // Auto-fit columns
-    const cols = headers.map(header => ({ wch: header.length + 5 }));
-    ws['!cols'] = cols;
-
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, sheetName);
-    XLSX.writeFile(wb, fileName);
+    // fire-and-forget to avoid forcing async at call sites
+    getXLSX().then((XLSX) => {
+        const ws = XLSX.utils.aoa_to_sheet([headers]);
+        const cols = headers.map(header => ({ wch: header.length + 5 }));
+        (ws as any)['!cols'] = cols;
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, sheetName);
+        XLSX.writeFile(wb, fileName);
+    }).catch(() => { });
 };
 
-export const exportMonthlySummaryToExcel = (
+export const exportMonthlySummaryToExcel = async (
     matchesForMonth: Match[],
     officials: Official[],
     month: string
 ) => {
+    const XLSX = await getXLSX();
     const officialMap = new Map(officials.map(o => [o.id, o]));
     const summary: { [officialId: string]: { official: Official, matchCount: number, totalIndemnity: number } } = {};
     const details: any[] = [];
@@ -106,14 +112,14 @@ export const exportMonthlySummaryToExcel = (
             }
         }
     }
-    
+
     const summaryData = Object.values(summary).map(s => ({
         'Nom de l\'Officiel': s.official.fullName,
         'Catégorie': s.official.category,
         'Nombre de Matchs': s.matchCount,
         'Total à Payer (DZD)': s.totalIndemnity,
-    })).sort((a,b) => a['Nom de l\'Officiel'].localeCompare(b['Nom de l\'Officiel']));
-    
+    })).sort((a, b) => a['Nom de l\'Officiel'].localeCompare(b['Nom de l\'Officiel']));
+
     details.sort((a, b) => {
         if (a['Nom Officiel'] < b['Nom Officiel']) return -1;
         if (a['Nom Officiel'] > b['Nom Officiel']) return 1;
@@ -130,9 +136,9 @@ export const exportMonthlySummaryToExcel = (
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, summaryWorksheet, 'Résumé par Officiel');
     XLSX.utils.book_append_sheet(workbook, detailsWorksheet, 'Détail des Prestations');
-    
+
     // Auto-fit columns for both sheets
-    const setColWidths = (ws: XLSX.WorkSheet, data: any[]) => {
+    const setColWidths = (ws: any, data: any[]) => {
         if (data.length === 0) return;
         const cols = Object.keys(data[0]).map(key => {
             const headerLength = key.length;
@@ -140,9 +146,9 @@ export const exportMonthlySummaryToExcel = (
             const maxLength = Math.max(...dataRows.map(val => val.length));
             return { wch: Math.max(headerLength, maxLength) + 2 };
         });
-        ws['!cols'] = cols;
+        (ws as any)['!cols'] = cols;
     };
-    
+
     setColWidths(summaryWorksheet, summaryData);
     setColWidths(detailsWorksheet, details);
 
@@ -180,7 +186,7 @@ export const generateEdiFile = (
     // --- Header Line ---
     const totalAmountInCents = Math.round(selectedPayments.reduce((sum, p) => sum + p.total, 0) * 100);
     const formattedDateYYYYMMDD = batchDetails.batchDate.replace(/-/g, '');
-    
+
     const headerContent = [
         'VIRM00201001',
         batchDetails.debitAccountNumber.replace(/\D/g, '').padStart(19, '0'), // Adjusted to 19 to align prefixes
@@ -193,7 +199,7 @@ export const generateEdiFile = (
     ].join('');
 
     const headerLine = headerContent.padEnd(250, ' ');
-    
+
     let fileContent = headerLine + '\n';
 
     // --- Detail Lines ---
@@ -208,7 +214,7 @@ export const generateEdiFile = (
         const monthNum = String(date.getUTCMonth() + 1).padStart(2, '0');
         const monthName = date.toLocaleString('fr-FR', { month: 'long', timeZone: 'UTC' }).charAt(0).toUpperCase() + date.toLocaleString('fr-FR', { month: 'long', timeZone: 'UTC' }).slice(1);
         const year = date.getUTCFullYear();
-        
+
         const detailContent = [
             String(index + 1).padStart(6, '0'),
             '10',
@@ -223,7 +229,7 @@ export const generateEdiFile = (
         ].join('');
 
         const detailLine = detailContent.padEnd(250, ' ');
-        
+
         fileContent += detailLine + '\n';
     });
 
@@ -240,7 +246,7 @@ export const generateEdiFile = (
         .toUpperCase();
     const year = date.getFullYear();
     const fileName = `VIR IND ARBITRES ${normalizedMonthName} ${year}.TXT`;
-    
+
     return { success: true, content: fileContent, fileName };
 };
 
@@ -250,51 +256,51 @@ export const exportIndividualStatementToExcel = (
     payments: Payment[],
     summary: { totalMatches: number, totalGross: number, totalIrg: number, grandTotal: number }
 ) => {
-    const worksheet = XLSX.utils.aoa_to_sheet([
-        ["Relevé Individuel d'Indemnités"],
-        [], // Empty row
-        ["Officiel:", official.fullName],
-        ["Période:", `Du ${new Date(dateRange.start).toLocaleDateString('fr-FR')} au ${new Date(dateRange.end).toLocaleDateString('fr-FR')}`],
-        [], // Empty row
-        ["Résumé"],
-        ["Nombre de matchs:", summary.totalMatches],
-        ["Total Brut:", summary.totalGross],
-        ["Total IRG:", summary.totalIrg],
-        ["Total Net:", summary.grandTotal],
-        [], // Empty row
-        ["Détails des Prestations"],
-    ]);
-
-    const detailsData = payments.map(p => ({
-        'Date Match': new Date(p.matchDate).toLocaleDateString('fr-FR'),
-        'Description Match': p.matchDescription,
-        'Rôle': p.role,
-        'Montant Brut (DZD)': p.indemnity,
-        'IRG (DZD)': p.irgAmount,
-        'Net Payé (DZD)': p.total,
-    }));
-    
-    XLSX.utils.sheet_add_json(worksheet, detailsData, { origin: 'A12', skipHeader: false });
-
-    worksheet["!merges"] = [
-        { s: { r: 0, c: 0 }, e: { r: 0, c: 4 } }, // Title
-        { s: { r: 5, c: 0 }, e: { r: 5, c: 1 } }, // Summary title
-        { s: { r: 10, c: 0 }, e: { r: 10, c: 4 } } // Details title
-    ];
-
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Relevé Individuel');
-    
-    // Auto-fit columns
-    const cols = [
-        { wch: 25 }, { wch: 40 }, { wch: 20 }, { wch: 15 }, { wch: 15 }, { wch: 15 }
-    ];
-    worksheet['!cols'] = cols;
-    
-    XLSX.writeFile(workbook, `Releve_${official.fullName.replace(/\s/g, '_')}_${dateRange.start}_${dateRange.end}.xlsx`);
+    // fire-and-forget to avoid changing call sites
+    getXLSX().then((XLSX) => {
+        const worksheet = XLSX.utils.aoa_to_sheet([
+            ["Relevé Individuel d'Indemnités"],
+            [],
+            ["Officiel:", official.fullName],
+            ["Période:", `Du ${new Date(dateRange.start).toLocaleDateString('fr-FR')} au ${new Date(dateRange.end).toLocaleDateString('fr-FR')}`],
+            [],
+            ["Résumé"],
+            ["Nombre de matchs:", summary.totalMatches],
+            ["Total Brut:", summary.totalGross],
+            ["Total IRG:", summary.totalIrg],
+            ["Total Net:", summary.grandTotal],
+            [],
+            ["Détails des Prestations"],
+        ]);
+        const detailsData = payments.map(p => ({
+            'Date Match': new Date(p.matchDate).toLocaleDateString('fr-FR'),
+            'Description Match': p.matchDescription,
+            'Rôle': p.role,
+            'Montant Brut (DZD)': p.indemnity,
+            'IRG (DZD)': p.irgAmount,
+            'Net Payé (DZD)': p.total,
+        }));
+        XLSX.utils.sheet_add_json(worksheet, detailsData, { origin: 'A12', skipHeader: false });
+        (worksheet as any)["!merges"] = [
+            { s: { r: 0, c: 0 }, e: { r: 0, c: 4 } },
+            { s: { r: 5, c: 0 }, e: { r: 5, c: 1 } },
+            { s: { r: 10, c: 0 }, e: { r: 10, c: 4 } }
+        ];
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, 'Relevé Individuel');
+        const cols = [
+            { wch: 25 }, { wch: 40 }, { wch: 20 }, { wch: 15 }, { wch: 15 }, { wch: 15 }
+        ];
+        (worksheet as any)['!cols'] = cols;
+        XLSX.writeFile(workbook, `Releve_${official.fullName.replace(/\s/g, '_')}_${dateRange.start}_${dateRange.end}.xlsx`);
+    }).catch(() => { });
 };
 
-export const exportGameDaySummaryToExcel = (matches: Match[], officials: Official[]): { success: boolean; error?: string } => {
+export const exportGameDaySummaryToExcel = async (
+    matches: Match[],
+    officials: Official[]
+): Promise<{ success: boolean; error?: string }> => {
+    const XLSX = await getXLSX();
     const dataToExport = matches.flatMap(match => {
         if (match.assignments.length === 0) {
             return [{
@@ -307,7 +313,7 @@ export const exportGameDaySummaryToExcel = (matches: Match[], officials: Officia
                 'Feuille Envoyée': match.isSheetSent ? 'Oui' : 'Non',
             }];
         }
-        
+
         return match.assignments.map(assignment => {
             const official = officials.find(o => o.id === assignment.officialId);
             return {
@@ -329,7 +335,7 @@ export const exportGameDaySummaryToExcel = (matches: Match[], officials: Officia
     const worksheet = XLSX.utils.json_to_sheet(dataToExport);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Résumé Journée');
-    
+
     // Auto-fit columns
     const cols = Object.keys(dataToExport[0]).map(key => {
         const headerLength = key.length;
@@ -337,8 +343,8 @@ export const exportGameDaySummaryToExcel = (matches: Match[], officials: Officia
         const maxLength = Math.max(...dataRows.map(val => val.length));
         return { wch: Math.max(headerLength, maxLength) + 2 };
     });
-    worksheet['!cols'] = cols;
-    
+    (worksheet as any)['!cols'] = cols;
+
     XLSX.writeFile(workbook, `Resume_Journee_${new Date().toISOString().split('T')[0]}.xlsx`);
     return { success: true };
 };

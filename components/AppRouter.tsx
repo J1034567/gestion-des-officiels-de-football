@@ -948,7 +948,10 @@ export const AppRouter = () => {
           />
           <Route path="/disciplinary" element={<DisciplinaryContainer />} />
           <Route path="/officials" element={<OfficialsContainer />} />
-          <Route path="/clubs" element={<ClubsContainer />} />
+          <Route
+            path="/clubs"
+            element={<ClubsContainer currentSeason={currentSeason} />}
+          />
           <Route path="/finances" element={<FinancesContainer />} />
           <Route
             path="/accounting"

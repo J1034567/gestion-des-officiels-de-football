@@ -200,7 +200,8 @@ export async function applyOptimizedAssignmentsFromData(
             return logAndThrow("set match unsent after import optimized", matchUpdateErr, { matchId });
     }
 }
-import * as XLSX from 'xlsx';
+let __xlsxPromise: Promise<typeof import('xlsx')> | null = null;
+const __getXLSX = () => (__xlsxPromise ||= import('xlsx'));
 import { Official, Match, OfficialRole, Team, Stadium, Assignment, Unavailability, MatchStatus, League, LeagueGroup, AccountingStatus, Location } from '../types';
 
 // Define a structured result for import operations
@@ -223,11 +224,13 @@ const readFileData = (file: File): Promise<any[][]> => {
         reader.onload = (e: ProgressEvent<FileReader>) => {
             try {
                 const data = e.target?.result;
-                const workbook = XLSX.read(data, { type: 'binary' });
-                const sheetName = workbook.SheetNames[0];
-                const worksheet = workbook.Sheets[sheetName];
-                const jsonData: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-                resolve(jsonData);
+                __getXLSX().then((XLSX) => {
+                    const workbook = XLSX.read(data as string | ArrayBuffer, { type: 'binary' });
+                    const sheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[sheetName];
+                    const jsonData: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                    resolve(jsonData);
+                }).catch(() => reject(new Error("Erreur lors du chargement du module Excel.")));
             } catch (error) {
                 reject(new Error("Erreur lors de l'analyse du fichier Excel. Assurez-vous qu'il s'agit d'un format valide."));
             }
@@ -243,11 +246,13 @@ const readCsvData = (file: File): Promise<any[][]> => {
         reader.onload = (e: ProgressEvent<FileReader>) => {
             try {
                 const text = e.target?.result as string;
-                const workbook = XLSX.read(text, { type: 'string' });
-                const sheetName = workbook.SheetNames[0];
-                const worksheet = workbook.Sheets[sheetName];
-                const jsonData: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-                resolve(jsonData);
+                __getXLSX().then((XLSX) => {
+                    const workbook = XLSX.read(text, { type: 'string' });
+                    const sheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[sheetName];
+                    const jsonData: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                    resolve(jsonData);
+                }).catch(() => reject(new Error("Erreur lors du chargement du module CSV/Excel.")));
             } catch (error) {
                 reject(new Error("Erreur lors de l'analyse du fichier CSV."));
             }

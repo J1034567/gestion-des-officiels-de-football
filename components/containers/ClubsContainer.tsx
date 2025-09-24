@@ -22,7 +22,9 @@ import {
   archiveStadiumWithGuard,
 } from "../../services/stadiumService";
 
-const ClubsContainer: React.FC = () => {
+const ClubsContainer: React.FC<{ currentSeason: string }> = ({
+  currentSeason,
+}) => {
   const { user, permissions } = useAuth();
   const { data: teamsData } = useTeams({
     pagination: { page: 1, pageSize: 5000 },
@@ -33,7 +35,7 @@ const ClubsContainer: React.FC = () => {
     filters: { includeArchived: true },
   });
   const { data: leagues } = useLeagues();
-  const { data: leagueGroups } = useLeagueGroups();
+  const { data: leagueGroups } = useLeagueGroups({ season: currentSeason });
   const { data: teamStadiums } = useTeamStadiums({});
   const { data: appSettings } = useAppSettings();
 
@@ -154,7 +156,7 @@ const ClubsContainer: React.FC = () => {
       currentUser={user!}
       permissions={permissions}
       localisations={localisations}
-      currentSeason={""}
+      currentSeason={currentSeason}
     />
   );
 };

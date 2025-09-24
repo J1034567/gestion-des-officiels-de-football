@@ -1,4 +1,10 @@
-import React, { useState, useCallback, useMemo, useEffect } from "react";
+import React, {
+  useState,
+  useCallback,
+  useMemo,
+  useEffect,
+  useRef,
+} from "react";
 import {
   Match,
   Official,
@@ -28,6 +34,7 @@ import GameDaySchedulerModal from "./GameDaySchedulerModal";
 import CalendarDaysIcon from "./icons/CalendarDaysIcon";
 import ScoreModal from "./ScoreModal";
 import AlertTriangleIcon from "./icons/AlertTriangleIcon";
+import { useVirtualizer } from "@tanstack/react-virtual";
 
 interface MatchesViewProps {
   matches: Match[];
@@ -100,6 +107,58 @@ interface LeagueData {
 interface HierarchicalMatches {
   [leagueId: string]: LeagueData;
 }
+
+const VirtualizedMatchGrid: React.FC<{
+  items: Match[];
+  estimateRowHeight?: number;
+  renderItem: (match: Match, index: number) => React.ReactNode;
+}> = ({ items, estimateRowHeight = 260, renderItem }) => {
+  const parentRef = useRef<HTMLDivElement | null>(null);
+  const columns = 2; // render two cards per virtual row
+  const rowCount = Math.ceil(items.length / columns);
+  const rowVirtualizer = useVirtualizer({
+    count: rowCount,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => estimateRowHeight,
+    overscan: 6,
+  });
+
+  const virtualRows = rowVirtualizer.getVirtualItems();
+  const totalSize = rowVirtualizer.getTotalSize();
+  const paddingTop = virtualRows.length ? virtualRows[0].start : 0;
+  const paddingBottom = virtualRows.length
+    ? totalSize - virtualRows[virtualRows.length - 1].end
+    : 0;
+
+  return (
+    <div ref={parentRef} className="max-h-[800px] overflow-auto">
+      {paddingTop > 0 && (
+        <div style={{ height: paddingTop }} aria-hidden="true" />
+      )}
+      <div className="space-y-8">
+        {virtualRows.map((v) => {
+          const startIndex = v.index * columns;
+          const rowItems = items.slice(startIndex, startIndex + columns);
+          return (
+            <div
+              key={`row-${v.index}`}
+              className="grid grid-cols-1 lg:grid-cols-2 gap-8"
+            >
+              {rowItems.map((m, i) => (
+                <React.Fragment key={m.id}>
+                  {renderItem(m, startIndex + i)}
+                </React.Fragment>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+      {paddingBottom > 0 && (
+        <div style={{ height: paddingBottom }} aria-hidden="true" />
+      )}
+    </div>
+  );
+};
 
 const MatchesView: React.FC<MatchesViewProps> = ({
   matches,
@@ -735,35 +794,33 @@ const MatchesView: React.FC<MatchesViewProps> = ({
                                       </button>
                                     </div>
                                   )}
-                                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                                    {(gameDays[activeDay]?.matches || []).map(
-                                      (match) => (
-                                        <MatchCard
-                                          key={match.id}
-                                          viewContext="matches"
-                                          match={match}
-                                          officials={officials}
-                                          users={users}
-                                          officialRoles={officialRoles}
-                                          locations={locations}
-                                          onEdit={handleEditMatch}
-                                          onUpdateMatchStatus={
-                                            onUpdateMatchStatus
-                                          }
-                                          onOpenScoreModal={
-                                            handleOpenScoreModal
-                                          }
-                                          onArchiveMatch={onArchiveMatch}
-                                          currentUser={currentUser}
-                                          permissions={permissions}
-                                          isSelected={selectedMatchIds.has(
-                                            match.id
-                                          )}
-                                          onSelect={handleSelectMatch}
-                                        />
-                                      )
+                                  <VirtualizedMatchGrid
+                                    items={gameDays[activeDay]?.matches || []}
+                                    estimateRowHeight={260}
+                                    renderItem={(match) => (
+                                      <MatchCard
+                                        key={match.id}
+                                        viewContext="matches"
+                                        match={match}
+                                        officials={officials}
+                                        users={users}
+                                        officialRoles={officialRoles}
+                                        locations={locations}
+                                        onEdit={handleEditMatch}
+                                        onUpdateMatchStatus={
+                                          onUpdateMatchStatus
+                                        }
+                                        onOpenScoreModal={handleOpenScoreModal}
+                                        onArchiveMatch={onArchiveMatch}
+                                        currentUser={currentUser}
+                                        permissions={permissions}
+                                        isSelected={selectedMatchIds.has(
+                                          match.id
+                                        )}
+                                        onSelect={handleSelectMatch}
+                                      />
                                     )}
-                                  </div>
+                                  />
                                 </div>
                               </>
                             )}

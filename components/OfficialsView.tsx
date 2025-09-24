@@ -29,6 +29,7 @@ import LocationPinIcon from "./icons/LocationPinIcon";
 import UsersIcon from "./icons/UsersIcon";
 import CheckCircleIcon from "./icons/CheckCircleIcon";
 import OfficialDetailView from "./OfficialDetailView";
+import { useVirtualizer } from "@tanstack/react-virtual";
 
 type GroupByKey = "location" | "category" | "profileStatus";
 type SortKey =
@@ -71,6 +72,43 @@ interface OfficialsViewProps {
     details?: { tableName?: string; recordId?: string | null }
   ) => Promise<void>;
 }
+
+const VirtualizedCardList = <T extends { id: string }>({
+  items,
+  estimateSize = 120,
+  renderItem,
+}: {
+  items: T[];
+  estimateSize?: number;
+  renderItem: (item: T) => React.ReactNode;
+}) => {
+  const parentRef = useRef<HTMLDivElement | null>(null);
+  const cardVirtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => estimateSize,
+    overscan: 8,
+  });
+  const virtualItems = cardVirtualizer.getVirtualItems();
+  const totalSize = cardVirtualizer.getTotalSize();
+  const paddingTop = virtualItems.length ? virtualItems[0].start : 0;
+  const paddingBottom = virtualItems.length
+    ? totalSize - virtualItems[virtualItems.length - 1].end
+    : 0;
+  return (
+    <div ref={parentRef} className="max-h-[600px] overflow-auto space-y-4">
+      {paddingTop > 0 && (
+        <div style={{ height: paddingTop }} aria-hidden="true" />
+      )}
+      {virtualItems.map(
+        (v) => renderItem(items[v.index]) as React.ReactElement
+      )}
+      {paddingBottom > 0 && (
+        <div style={{ height: paddingBottom }} aria-hidden="true" />
+      )}
+    </div>
+  );
+};
 
 const isUnavailableOnDate = (
   official: Official,
@@ -297,6 +335,7 @@ const OfficialsView: React.FC<OfficialsViewProps> = (props) => {
     key: SortKey;
     direction: "asc" | "desc";
   } | null>({ key: "createdAt", direction: "desc" });
+  const tableParentRef = useRef<HTMLDivElement | null>(null);
 
   // State for new bulk actions
   const [isBulkArchiveModalOpen, setIsBulkArchiveModalOpen] = useState(false);
@@ -585,6 +624,13 @@ const OfficialsView: React.FC<OfficialsViewProps> = (props) => {
     nextUpcomingMatchDate,
     formatLocation,
   ]);
+
+  const rowVirtualizer = useVirtualizer({
+    count: sortedOfficialsForList.length,
+    getScrollElement: () => tableParentRef.current,
+    estimateSize: () => 56,
+    overscan: 10,
+  });
 
   const requestListSort = (key: SortKey) => {
     let direction: "asc" | "desc" = "asc";
@@ -976,8 +1022,10 @@ const OfficialsView: React.FC<OfficialsViewProps> = (props) => {
                                 <h4 className="text-md font-semibold text-gray-300 mb-2">
                                   Arbitres ({referees.length})
                                 </h4>
-                                <div className="space-y-4">
-                                  {referees.map((official) => {
+                                <VirtualizedCardList
+                                  items={referees}
+                                  estimateSize={116}
+                                  renderItem={(official) => {
                                     const incompleteFields =
                                       getIncompleteProfileFields(official);
                                     return (
@@ -1010,8 +1058,8 @@ const OfficialsView: React.FC<OfficialsViewProps> = (props) => {
                                         }
                                       />
                                     );
-                                  })}
-                                </div>
+                                  }}
+                                />
                               </div>
                             )}
                             {delegates.length > 0 && (
@@ -1019,8 +1067,10 @@ const OfficialsView: React.FC<OfficialsViewProps> = (props) => {
                                 <h4 className="text-md font-semibold text-gray-300 mb-2">
                                   Délégués ({delegates.length})
                                 </h4>
-                                <div className="space-y-4">
-                                  {delegates.map((official) => {
+                                <VirtualizedCardList
+                                  items={delegates}
+                                  estimateSize={116}
+                                  renderItem={(official) => {
                                     const incompleteFields =
                                       getIncompleteProfileFields(official);
                                     return (
@@ -1053,8 +1103,8 @@ const OfficialsView: React.FC<OfficialsViewProps> = (props) => {
                                         }
                                       />
                                     );
-                                  })}
-                                </div>
+                                  }}
+                                />
                               </div>
                             )}
                           </div>
@@ -1073,179 +1123,226 @@ const OfficialsView: React.FC<OfficialsViewProps> = (props) => {
             ) : (
               <div className="bg-gray-800 rounded-lg shadow-md overflow-hidden">
                 <div className="overflow-x-auto">
-                  <table className="min-w-full">
-                    <thead className="bg-gray-700">
-                      <tr>
-                        <th scope="col" className="p-4">
-                          <input
-                            type="checkbox"
-                            onChange={handleSelectAll}
-                            checked={
-                              selectedOfficialIds.size ===
-                                sortedOfficialsForList.length &&
-                              sortedOfficialsForList.length > 0
-                            }
-                            className="h-4 w-4 rounded bg-gray-900 border-gray-600 text-brand-primary focus:ring-brand-secondary"
-                          />
-                        </th>
-                        <th
-                          scope="col"
-                          className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
-                          onClick={() => requestListSort("fullName")}
-                        >
-                          Nom
-                        </th>
-                        <th
-                          scope="col"
-                          className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
-                          onClick={() => requestListSort("category")}
-                        >
-                          Catégorie
-                        </th>
-                        <th
-                          scope="col"
-                          className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
-                          onClick={() => requestListSort("location")}
-                        >
-                          Localisation
-                        </th>
-                        <th
-                          scope="col"
-                          className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
-                          onClick={() => requestListSort("createdAt")}
-                        >
-                          Date Création
-                        </th>
-                        <th
-                          scope="col"
-                          className="px-6 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
-                          onClick={() => requestListSort("availability")}
-                        >
-                          Disponibilité
-                        </th>
-                        <th
-                          scope="col"
-                          className="px-6 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
-                          onClick={() => requestListSort("profileStatus")}
-                        >
-                          Profil
-                        </th>
-                        <th
-                          scope="col"
-                          className="px-6 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider"
-                        >
-                          Actions
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-700">
-                      {sortedOfficialsForList.map((official) => {
-                        const isSelected = selectedOfficialIds.has(official.id);
-                        const incompleteFields =
-                          getIncompleteProfileFields(official);
-                        const isProfileComplete = incompleteFields.length === 0;
-                        const isAvailable = !isUnavailableOnDate(
-                          official,
-                          nextUpcomingMatchDate
-                        );
-                        return (
-                          <tr
-                            key={official.id}
-                            className={`transition-colors ${
-                              isSelected
-                                ? "bg-brand-primary/10"
-                                : "hover:bg-gray-700/50"
-                            }`}
+                  <div
+                    ref={tableParentRef}
+                    className="max-h-[600px] overflow-auto"
+                  >
+                    <table className="min-w-full">
+                      <thead className="bg-gray-700">
+                        <tr>
+                          <th scope="col" className="p-4">
+                            <input
+                              type="checkbox"
+                              onChange={handleSelectAll}
+                              checked={
+                                selectedOfficialIds.size ===
+                                  sortedOfficialsForList.length &&
+                                sortedOfficialsForList.length > 0
+                              }
+                              className="h-4 w-4 rounded bg-gray-900 border-gray-600 text-brand-primary focus:ring-brand-secondary"
+                            />
+                          </th>
+                          <th
+                            scope="col"
+                            className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
+                            onClick={() => requestListSort("fullName")}
                           >
-                            <td className="p-4">
-                              <input
-                                type="checkbox"
-                                checked={isSelected}
-                                onChange={() =>
-                                  handleSelectOfficial(official.id)
-                                }
-                                className="h-4 w-4 rounded bg-gray-900 border-gray-600 text-brand-primary focus:ring-brand-secondary"
-                              />
-                            </td>
-                            <td className="px-6 py-4 whitespace-nowrap">
-                              <div
-                                className="text-sm font-medium text-white cursor-pointer hover:text-brand-primary"
-                                onClick={() => handleViewDetails(official)}
-                              >
-                                {official.fullName}
-                              </div>
-                            </td>
-                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-300">
-                              {official.category}
-                            </td>
-                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-300">
-                              {formatLocation(official.locationId) || (
-                                <span className="italic text-yellow-500">
-                                  Non spécifiée
-                                </span>
-                              )}
-                            </td>
-                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-300">
-                              {new Date(official.createdAt).toLocaleString(
-                                "fr-FR",
-                                {
-                                  day: "2-digit",
-                                  month: "2-digit",
-                                  year: "numeric",
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                }
-                              )}
-                            </td>
-                            <td className="px-6 py-4 whitespace-nowrap text-center">
-                              <span
-                                className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                                  isAvailable
-                                    ? "bg-green-900 text-green-300"
-                                    : "bg-red-900 text-red-300"
+                            Nom
+                          </th>
+                          <th
+                            scope="col"
+                            className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
+                            onClick={() => requestListSort("category")}
+                          >
+                            Catégorie
+                          </th>
+                          <th
+                            scope="col"
+                            className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
+                            onClick={() => requestListSort("location")}
+                          >
+                            Localisation
+                          </th>
+                          <th
+                            scope="col"
+                            className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
+                            onClick={() => requestListSort("createdAt")}
+                          >
+                            Date Création
+                          </th>
+                          <th
+                            scope="col"
+                            className="px-6 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
+                            onClick={() => requestListSort("availability")}
+                          >
+                            Disponibilité
+                          </th>
+                          <th
+                            scope="col"
+                            className="px-6 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
+                            onClick={() => requestListSort("profileStatus")}
+                          >
+                            Profil
+                          </th>
+                          <th
+                            scope="col"
+                            className="px-6 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider"
+                          >
+                            Actions
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-700">
+                        {(() => {
+                          const virtualRows = rowVirtualizer.getVirtualItems();
+                          const totalSize = rowVirtualizer.getTotalSize();
+                          const paddingTop = virtualRows.length
+                            ? virtualRows[0].start
+                            : 0;
+                          const paddingBottom = virtualRows.length
+                            ? totalSize -
+                              virtualRows[virtualRows.length - 1].end
+                            : 0;
+                          const cols = 8;
+                          const rows: React.ReactNode[] = [];
+                          if (paddingTop > 0) {
+                            rows.push(
+                              <tr key="pad-top">
+                                <td
+                                  colSpan={cols}
+                                  style={{ height: paddingTop }}
+                                />
+                              </tr>
+                            );
+                          }
+                          for (const v of virtualRows) {
+                            const official = sortedOfficialsForList[v.index];
+                            const isSelected = selectedOfficialIds.has(
+                              official.id
+                            );
+                            const incompleteFields =
+                              getIncompleteProfileFields(official);
+                            const isProfileComplete =
+                              incompleteFields.length === 0;
+                            const isAvailable = !isUnavailableOnDate(
+                              official,
+                              nextUpcomingMatchDate
+                            );
+                            rows.push(
+                              <tr
+                                key={official.id}
+                                className={`transition-colors ${
+                                  isSelected
+                                    ? "bg-brand-primary/10"
+                                    : "hover:bg-gray-700/50"
                                 }`}
                               >
-                                {isAvailable ? "Disponible" : "Indisponible"}
-                              </span>
-                            </td>
-                            <td className="px-6 py-4 whitespace-nowrap text-center">
-                              {isProfileComplete ? (
-                                <span className="text-green-400">Complet</span>
-                              ) : (
-                                <div className="group relative flex justify-center items-center">
-                                  <span className="text-yellow-400">
-                                    Incomplet
-                                  </span>
-                                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-max max-w-xs bg-gray-900 text-white text-xs rounded py-1 px-2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 shadow-lg">
-                                    Infos manquantes:{" "}
-                                    {incompleteFields.join(", ")}
+                                <td className="p-4">
+                                  <input
+                                    type="checkbox"
+                                    checked={isSelected}
+                                    onChange={() =>
+                                      handleSelectOfficial(official.id)
+                                    }
+                                    className="h-4 w-4 rounded bg-gray-900 border-gray-600 text-brand-primary focus:ring-brand-secondary"
+                                  />
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap">
+                                  <div
+                                    className="text-sm font-medium text-white cursor-pointer hover:text-brand-primary"
+                                    onClick={() => handleViewDetails(official)}
+                                  >
+                                    {official.fullName}
                                   </div>
-                                </div>
-                              )}
-                            </td>
-                            <td className="px-6 py-4 whitespace-nowrap text-center text-sm font-medium">
-                              <button
-                                onClick={() => handleEdit(official)}
-                                className="text-gray-300 hover:text-brand-primary p-1 rounded-full hover:bg-gray-700 transition-colors mr-2"
-                                title="Modifier"
-                              >
-                                <PencilIcon className="h-4 w-4" />
-                              </button>
-                              <button
-                                onClick={() =>
-                                  handleManageAvailability(official)
-                                }
-                                className="text-gray-300 hover:text-brand-primary p-1 rounded-full hover:bg-gray-700 transition-colors"
-                                title="Gérer les disponibilités"
-                              >
-                                <CalendarDaysIcon className="h-4 w-4" />
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-300">
+                                  {official.category}
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-300">
+                                  {formatLocation(official.locationId) || (
+                                    <span className="italic text-yellow-500">
+                                      Non spécifiée
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-300">
+                                  {new Date(official.createdAt).toLocaleString(
+                                    "fr-FR",
+                                    {
+                                      day: "2-digit",
+                                      month: "2-digit",
+                                      year: "numeric",
+                                      hour: "2-digit",
+                                      minute: "2-digit",
+                                    }
+                                  )}
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-center">
+                                  <span
+                                    className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                                      isAvailable
+                                        ? "bg-green-900 text-green-300"
+                                        : "bg-red-900 text-red-300"
+                                    }`}
+                                  >
+                                    {isAvailable
+                                      ? "Disponible"
+                                      : "Indisponible"}
+                                  </span>
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-center">
+                                  {isProfileComplete ? (
+                                    <span className="text-green-400">
+                                      Complet
+                                    </span>
+                                  ) : (
+                                    <div className="group relative flex justify-center items-center">
+                                      <span className="text-yellow-400">
+                                        Incomplet
+                                      </span>
+                                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-max max-w-xs bg-gray-900 text-white text-xs rounded py-1 px-2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 shadow-lg">
+                                        Infos manquantes:{" "}
+                                        {incompleteFields.join(", ")}
+                                      </div>
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-center text-sm font-medium">
+                                  <button
+                                    onClick={() => handleEdit(official)}
+                                    className="text-gray-300 hover:text-brand-primary p-1 rounded-full hover:bg-gray-700 transition-colors mr-2"
+                                    title="Modifier"
+                                  >
+                                    <PencilIcon className="h-4 w-4" />
+                                  </button>
+                                  <button
+                                    onClick={() =>
+                                      handleManageAvailability(official)
+                                    }
+                                    className="text-gray-300 hover:text-brand-primary p-1 rounded-full hover:bg-gray-700 transition-colors"
+                                    title="Gérer les disponibilités"
+                                  >
+                                    <CalendarDaysIcon className="h-4 w-4" />
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          }
+                          if (paddingBottom > 0) {
+                            rows.push(
+                              <tr key="pad-bottom">
+                                <td
+                                  colSpan={cols}
+                                  style={{ height: paddingBottom }}
+                                />
+                              </tr>
+                            );
+                          }
+                          return <>{rows}</>;
+                        })()}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
             )}
