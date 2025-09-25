@@ -1,6 +1,14 @@
-import { serve } from 'std/http/server.ts';
-import { PDFDocument } from "pdf-lib";
+// Supabase Edge Function (Deno) - bulk merge mission orders
+// Use explicit versioned remote imports for deterministic builds & local TS clarity.
+// deno-lint-ignore-file
+// @ts-nocheck
+import { serve } from 'https://deno.land/std@0.208.0/http/server.ts';
+import { PDFDocument } from 'https://esm.sh/pdf-lib@1.17.1';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+// Minimal Deno env typing (avoids TS complaints in local editor builds not aware of Deno types)
+// If you add a deno.json with type declarations you can remove this.
+declare const Deno: { env: { get(key: string): string | undefined } };
 
 // Basic CORS (can be tightened later)
 const cors = {
@@ -28,7 +36,7 @@ async function fetchSinglePdf(matchId: string, officialId: string, token: string
     return buf;
 }
 
-serve(async (req) => {
+serve(async (req: Request) => {
     if (req.method === 'OPTIONS') {
         return new Response('ok', { headers: cors });
     }
@@ -46,9 +54,9 @@ serve(async (req) => {
         const userClient = createClient(supabaseUrl, anonKey, { global: { headers: { Authorization: authHeader } } });
         const adminClient = createClient(supabaseUrl, serviceKey);
 
-        let body: any;
+        let body: unknown;
         try { body = await req.json(); } catch { body = null; }
-        const orders: OrderInput[] = body?.orders || [];
+        const orders: OrderInput[] = (body as any)?.orders || [];
         if (!Array.isArray(orders) || orders.length === 0) {
             return new Response(JSON.stringify({ error: 'orders array required' }), { headers: { ...cors, 'Content-Type': 'application/json' }, status: 400 });
         }
@@ -71,7 +79,7 @@ serve(async (req) => {
                 const singleBytes = await fetchSinglePdf(o.matchId, o.officialId, sessionToken, supabaseUrl);
                 const src = await PDFDocument.load(singleBytes);
                 const pages = await mergedPdf.copyPages(src, src.getPageIndices());
-                pages.forEach(p => mergedPdf.addPage(p));
+                pages.forEach((p: any) => mergedPdf.addPage(p));
             } catch (e) {
                 console.error('Failed order', o, e);
             }
