@@ -40,6 +40,8 @@ import { useTeams } from "../hooks/useTeams";
 import { useMatches } from "../hooks/useMatches";
 import { useAuditLogs } from "../hooks/useAuditLogs";
 import { UserRole } from "../types";
+import { useNotificationContext } from "@/contexts/NotificationContext";
+import { setExportServiceNotifier } from "@/services/exportService";
 
 const ProtectedRoute = ({
   isAllowed,
@@ -62,6 +64,11 @@ export const AppRouter = () => {
   const [currentSeason, setCurrentSeason] = useState<string>("");
   const [currentLeagueId, setCurrentLeagueId] = useState<string>("all");
   // Removed obsolete settingsDirty state (managed inside SettingsContainer now)
+
+  const { showNotification } = useNotificationContext();
+  React.useEffect(() => {
+    setExportServiceNotifier(showNotification);
+  }, [showNotification]);
 
   // Initialize season from localStorage if available; otherwise default to latest from settings
   useEffect(() => {

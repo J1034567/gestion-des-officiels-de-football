@@ -5,6 +5,8 @@ import React, {
   useCallback,
   useRef,
 } from "react";
+import { useDistance } from "../hooks/useDistance";
+import { computeBufferedDistance } from "../utils/distance";
 import {
   Match,
   Official,
@@ -49,30 +51,7 @@ function useDebounce<T>(value: T, delay: number): T {
   return debouncedValue;
 }
 
-function getDistanceFromLatLonInKm(
-  lat1: number | null,
-  lon1: number | null,
-  lat2: number | null,
-  lon2: number | null
-): number | null {
-  if (lat1 == null || lon1 == null || lat2 == null || lon2 == null) return null;
-  const R = 6371; // Radius of the earth in km
-  const dLat = deg2rad(lat2 - lat1);
-  const dLon = deg2rad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(deg2rad(lat1)) *
-      Math.cos(deg2rad(lat2)) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  const d = R * c; // Distance in km
-  return d;
-}
-
-function deg2rad(deg: number) {
-  return deg * (Math.PI / 180);
-}
+// (Removed inline haversine helpers; replaced by shared util)
 
 // --- Interfaces ---
 interface GameDayFocusViewProps {
@@ -659,48 +638,85 @@ export const GameDayFocusView: React.FC<GameDayFocusViewProps> = ({
     [onUpdateAssignment, onAddAssignment]
   );
 
+  const { getRoundTripBufferedKm } = useDistance({
+    supabase: null,
+    enqueueMissing: true,
+  });
+  const inflightDistance = useRef<Set<string>>(new Set());
   const handleDragOver = useCallback(
     (e: React.DragEvent<HTMLDivElement>) => {
       e.preventDefault();
       if (!draggingOfficialId) return;
-
       const { matchId, assignmentId, role } = e.currentTarget.dataset;
       if (!matchId || !role) return;
-
       const slotKey = `${matchId}-${assignmentId || role}`;
-
-      if (slotKey !== dragOverSlot) {
-        setDragOverSlot(slotKey);
-
-        let distance: number | null = null;
-        const cacheKey = `${draggingOfficialId}-${matchId}`;
-
-        if (distanceCache.current.has(cacheKey)) {
-          distance = distanceCache.current.get(cacheKey)!;
-        } else {
-          const match = matches.find((m) => m.id === matchId);
-          const official = officialsById.get(draggingOfficialId);
-
-          if (match?.stadium?.locationId && official?.locationId) {
-            const stadiumLocation = locationIdMap.get(match.stadium.locationId);
-            const officialLocation = locationIdMap.get(official.locationId);
-            if (stadiumLocation && officialLocation) {
-              const calculated = getDistanceFromLatLonInKm(
-                officialLocation.latitude,
-                officialLocation.longitude,
-                stadiumLocation.latitude,
-                stadiumLocation.longitude
-              );
-              distance =
-                calculated != null ? Math.round(calculated * 2 * 1.2) : null;
-            }
-          }
-          distanceCache.current.set(cacheKey, distance);
+      if (slotKey === dragOverSlot) return;
+      setDragOverSlot(slotKey);
+      const cacheKey = `${draggingOfficialId}-${matchId}`;
+      if (distanceCache.current.has(cacheKey)) {
+        setHoveredDistance(distanceCache.current.get(cacheKey) || null);
+        return;
+      }
+      const match = matches.find((m) => m.id === matchId);
+      const official = officialsById.get(draggingOfficialId);
+      let provisional: number | null = null;
+      if (match?.stadium?.locationId && official?.locationId) {
+        const stadiumLocation = locationIdMap.get(match.stadium.locationId);
+        const officialLocation = locationIdMap.get(official.locationId);
+        if (
+          stadiumLocation &&
+          officialLocation &&
+          stadiumLocation.latitude != null &&
+          stadiumLocation.longitude != null &&
+          officialLocation.latitude != null &&
+          officialLocation.longitude != null
+        ) {
+          provisional = computeBufferedDistance(
+            officialLocation.latitude,
+            officialLocation.longitude,
+            stadiumLocation.latitude,
+            stadiumLocation.longitude
+          );
         }
-        setHoveredDistance(distance);
+      }
+      distanceCache.current.set(cacheKey, provisional);
+      setHoveredDistance(provisional);
+      if (!inflightDistance.current.has(cacheKey)) {
+        inflightDistance.current.add(cacheKey);
+        (async () => {
+          try {
+            const match = matches.find((m) => m.id === matchId);
+            const official = officialsById.get(draggingOfficialId);
+            if (match?.stadium?.locationId && official?.locationId) {
+              const stadiumLocation = locationIdMap.get(
+                match.stadium.locationId
+              );
+              const officialLocation = locationIdMap.get(official.locationId);
+              if (stadiumLocation && officialLocation) {
+                const refined = await getRoundTripBufferedKm(
+                  officialLocation,
+                  stadiumLocation
+                );
+                if (refined != null) {
+                  distanceCache.current.set(cacheKey, refined);
+                  if (dragOverSlot === slotKey) setHoveredDistance(refined);
+                }
+              }
+            }
+          } finally {
+            inflightDistance.current.delete(cacheKey);
+          }
+        })();
       }
     },
-    [draggingOfficialId, dragOverSlot, matches, officialsById, locationIdMap]
+    [
+      draggingOfficialId,
+      dragOverSlot,
+      matches,
+      officialsById,
+      locationIdMap,
+      getRoundTripBufferedKm,
+    ]
   );
 
   const handleDragLeave = useCallback(() => {
