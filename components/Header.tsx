@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import WhistleIcon from "./icons/WhistleIcon";
 import CogIcon from "./icons/CogIcon";
@@ -15,6 +15,9 @@ import { supabase } from "../lib/supabaseClient";
 import { logAndThrow } from "../utils/logging";
 import { useNotificationContext } from "../contexts/NotificationContext";
 import { makeNotifier } from "../utils/notify";
+import { useJobCenter } from "../hooks/useJobCenter";
+import JobsIcon from "./icons/JobsIcon";
+import JobCenterPanel from "./JobCenterPanel";
 
 interface HeaderProps {
   seasons: string[];
@@ -50,6 +53,8 @@ const Header: React.FC<HeaderProps> = ({
   const location = useLocation();
   const { showNotification } = useNotificationContext();
   const notify = makeNotifier(showNotification);
+  const { activeCount } = useJobCenter();
+  const [showJobs, setShowJobs] = useState(false);
 
   const handleLogout = async () => {
     try {
@@ -192,6 +197,26 @@ const Header: React.FC<HeaderProps> = ({
                   <CogIcon className="h-5 w-5" />
                 </NavLink>
               )}
+              <button
+                  className={`relative p-2 rounded-full transition-colors ${
+                    showJobs
+                      ? "bg-gray-900 text-white"
+                      : "text-gray-400 hover:bg-gray-700 hover:text-white"
+                  }`}
+                  onClick={() => setShowJobs((s) => !s)}
+                  title="Tâches en arrière-plan"
+                  aria-label="Tâches en arrière-plan"
+                >
+                  <JobsIcon size={18} />
+                  {activeCount > 0 && (
+                    <span className="absolute -top-1 -right-1 bg-blue-600 text-white text-[10px] font-semibold rounded-full h-5 min-w-[20px] flex items-center justify-center px-[4px]">
+                      {activeCount}
+                    </span>
+                  )}
+                </button>
+                {showJobs && (
+                  <JobCenterPanel onClose={() => setShowJobs(false)} />
+                )}
             </nav>
             <div className="ml-4 border-l border-gray-700 pl-4 flex items-center">
               <div className="hidden sm:block">

@@ -5,6 +5,8 @@ import {
   NotificationToaster,
 } from "./contexts/NotificationContext";
 import { AppRouter } from "./components/AppRouter";
+import JobCenterEvents from "./components/JobCenterEvents";
+import JobCenterOrchestrator from "./components/JobCenterOrchestrator";
 import { useAuth } from "./contexts/AuthContext";
 import VerificationPage from "./components/VerificationPage";
 
@@ -32,6 +34,8 @@ const App: React.FC = () => {
     <NotificationProvider>
       <div className="min-h-screen bg-gray-900">
         <NotificationToaster />
+        <JobCenterEvents />
+        <JobCenterOrchestrator />
         {!session ? <Auth /> : <AppRouter />}
       </div>
     </NotificationProvider>

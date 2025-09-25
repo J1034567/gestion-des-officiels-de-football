@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { JobCenterProvider } from "./hooks/useJobCenter";
 import { SessionContextProvider } from "@supabase/auth-helpers-react";
 import { supabase } from "./lib/supabaseClient";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -17,14 +18,14 @@ if (!rootElement) {
 const root = ReactDOM.createRoot(rootElement);
 root.render(
   <React.StrictMode>
-   
-      <SessionContextProvider supabaseClient={supabase}>
-        <QueryClientProvider client={queryClient}>
-          <AuthProvider>
+    <SessionContextProvider supabaseClient={supabase}>
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
+          <JobCenterProvider>
             <App />
-          </AuthProvider>
-        </QueryClientProvider>
-      </SessionContextProvider>
-
+          </JobCenterProvider>
+        </AuthProvider>
+      </QueryClientProvider>
+    </SessionContextProvider>
   </React.StrictMode>
 );

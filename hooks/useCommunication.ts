@@ -2,7 +2,8 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../lib/supabaseClient';
 import { generateMatchSheetHtml } from '../services/emailService'; // Assuming you extract this
-import { generateBulkMissionOrdersPDF, generateMissionOrderPDF } from '../services/pdfService'; // Assuming you extract this
+import { generateBulkMissionOrdersPDF } from '../services/pdfService'; // Legacy bulk (kept for fallback if needed)
+import { getMissionOrderPdf, getBulkMissionOrdersPdf } from '../services/missionOrderService';
 import { Match, Official, Location } from '../types';
 import { blobToBase64 } from '../utils/fileHelpers';
 import { logAndThrow } from '../utils/logging';
@@ -31,7 +32,8 @@ export function useSendMatchSheet() {
                 officialId: official.id,
             }));
 
-            const pdfBlob = await generateBulkMissionOrdersPDF(ordersToGenerate);
+            // Prefer cached bulk generation via service (will reuse existing single PDFs within session)
+            const pdfBlob = await getBulkMissionOrdersPdf(ordersToGenerate) || await generateBulkMissionOrdersPDF(ordersToGenerate);
             if (!pdfBlob) {
                 throw new Error("Erreur lors de la génération du PDF des ordres de mission.");
             }
@@ -105,7 +107,7 @@ export function useSendIndividualMissionOrder() {
                 throw new Error("Impossible d'envoyer: L'officiel n'a pas d'adresse e-mail enregistrée.");
             }
 
-            const pdfBlob = await generateMissionOrderPDF(match.id, official.id);
+            const pdfBlob = await getMissionOrderPdf(match.id, official.id);
             const base64Pdf = await blobToBase64(pdfBlob);
             const fileName = `ordre_de_mission_${official.lastName}_${match.homeTeam.code}_${match.awayTeam.code}.pdf`;
 

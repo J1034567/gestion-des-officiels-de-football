@@ -119,7 +119,6 @@ const EtatsView: React.FC<EtatsViewProps> = ({
                 <html>
                     <head>
                         <title>Relevé Individuel</title>
-                        <script src="https://cdn.tailwindcss.com"></script>
                         <style>
                             @page { size: auto; margin: 0.5in; }
                             body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }

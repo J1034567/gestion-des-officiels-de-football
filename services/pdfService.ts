@@ -9,46 +9,32 @@ import { PDFDocument } from 'pdf-lib';
  * @param {string} officialId - The ID of the official.
  * @returns {Promise<Blob>} A promise that resolves to the PDF file as a Blob.
  */
-export const generateMissionOrderPDF = async (
-    matchId: string,
-    officialId: string
-): Promise<Blob> => {
-    if (!matchId || !officialId) {
-        throw new Error("Match ID and Official ID are required to generate a mission order.");
-    }
-
+export const generateMissionOrderPDF = async (matchId: string, officialId: string): Promise<Blob> => {
+    if (!matchId || !officialId) throw new Error('Match ID and Official ID are required to generate a mission order.');
     try {
-        // Get the current session for auth
+        const { data, error } = await supabase.functions.invoke('generate-mission-order', {
+            body: { matchId, officialId },
+        });
+        if (error) throw error;
+        // supabase.functions.invoke returns JSON by default; our function returns PDF bytes.
+        // So we fallback to manual fetch if invoke did not give us a Blob (Edge functions currently return Response).
+        // We attempt a direct call only if data is not a Blob-like (heuristic).
+        if (data instanceof Blob) return data;
+        // Fallback direct fetch (for compatibility if invoke wrapper changes)
         const { data: { session } } = await supabase.auth.getSession();
-        if (!session) {
-            throw new Error('No authentication session found');
-        }
-
-        // Make direct fetch call to the edge function
-        const response = await fetch(
-            `https://tgttliylrnsowfksknfl.supabase.co/functions/v1/generate-mission-order`,
-            {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${session.access_token}`,
-                    'apikey': "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRndHRsaXlscm5zb3dma3NrbmZsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTU3OTk2MDgsImV4cCI6MjA3MTM3NTYwOH0.ZtWVESKOum90EEHi6ZX_X_cdltnrMT5jFGiGMd4n0xQ",
-                },
-                body: JSON.stringify({ matchId, officialId }),
-            }
-        );
-
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Failed to generate PDF: ${errorText}`);
-        }
-
-        // Get the response as a blob directly
-        const blob = await response.blob();
-        return blob;
-    } catch (error) {
-        console.error('Error generating mission order:', error);
-        throw error;
+        
+        if (!session) throw new Error('No authentication session found');
+        const url = `${(supabase as any).supabaseUrl || ''}/functions/v1/generate-mission-order`;
+        const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+            body: JSON.stringify({ matchId, officialId })
+        });
+        if (!resp.ok) throw new Error(`Failed to generate PDF (fallback): ${await resp.text()}`);
+        return await resp.blob();
+    } catch (e) {
+        console.error('Error generating mission order:', e);
+        throw e;
     }
 };
 
@@ -66,7 +52,7 @@ export const generateBulkMissionOrdersPDF = async (
 
     try {
         // 1. Fetch all individual PDFs in parallel
-        const pdfPromises = orders.map(order => 
+        const pdfPromises = orders.map(order =>
             generateMissionOrderPDF(order.matchId, order.officialId)
         );
         const pdfBlobs = await Promise.all(pdfPromises);
@@ -83,14 +69,15 @@ export const generateBulkMissionOrdersPDF = async (
                 copiedPages.forEach(page => mergedPdf.addPage(page));
             }
         }
-        
+
         if (mergedPdf.getPageCount() === 0) {
             throw new Error("No pages were generated for the selected orders.");
         }
 
         // 4. Save the merged PDF and return it as a Blob
         const mergedPdfBytes = await mergedPdf.save();
-        return new Blob([mergedPdfBytes], { type: 'application/pdf' });
+        const arrayBuffer = (mergedPdfBytes instanceof Uint8Array ? mergedPdfBytes : new Uint8Array(mergedPdfBytes)).slice().buffer;
+        return new Blob([arrayBuffer], { type: 'application/pdf' });
 
     } catch (error) {
         console.error('Error generating bulk mission orders:', error);
