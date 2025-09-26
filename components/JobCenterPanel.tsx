@@ -95,7 +95,7 @@ export const JobCenterPanel: React.FC<JobCenterPanelProps> = ({ onClose }) => {
           </button>
           <button
             className="text-xs px-2 py-1 rounded border bg-gray-700 border-gray-600 hover:bg-gray-600"
-            onClick={() => clearCompleted()}
+            onClick={clearCompleted}
           >
             Nettoyer
           </button>

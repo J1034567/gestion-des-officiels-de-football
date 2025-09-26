@@ -9,7 +9,6 @@ import JobCenterEvents from "./components/JobCenterEvents";
 import JobCenterOrchestrator from "./components/JobCenterOrchestrator";
 import { useAuth } from "./contexts/AuthContext";
 import VerificationPage from "./components/VerificationPage";
-import { JobRealtimeBridge } from "./hooks/useJobCenter";
 
 const App: React.FC = () => {
   const { session, isLoading } = useAuth();
@@ -37,7 +36,6 @@ const App: React.FC = () => {
         <NotificationToaster />
         <JobCenterEvents />
         <JobCenterOrchestrator />
-        <JobRealtimeBridge />
         {!session ? <Auth /> : <AppRouter />}
       </div>
     </NotificationProvider>

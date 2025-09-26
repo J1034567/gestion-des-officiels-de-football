@@ -22,7 +22,6 @@ export const generateMissionOrderPDF = async (matchId: string, officialId: strin
         if (data instanceof Blob) return data;
         // Fallback direct fetch (for compatibility if invoke wrapper changes)
         const { data: { session } } = await supabase.auth.getSession();
-        
         if (!session) throw new Error('No authentication session found');
         const url = `${(supabase as any).supabaseUrl || ''}/functions/v1/generate-mission-order`;
         const resp = await fetch(url, {

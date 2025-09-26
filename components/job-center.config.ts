@@ -1,5 +1,5 @@
 // src/components/job-center.config.ts
-import { CheckCircle2, XCircle, AlertTriangle, Zap, Hourglass, Loader } from 'lucide-react';
+import { CheckCircle2, XCircle, AlertTriangle, Zap, Hourglass, Loader, Pause, RotateCcw } from 'lucide-react';
 import { JobRecord } from '../hooks/useJobCenter';
 
 export type JobStatus = JobRecord['status'];
@@ -40,6 +40,18 @@ export const STATUS_CONFIG: Record<JobStatus, {
         Icon: AlertTriangle,
         color: 'bg-gray-600/90',
         priority: 5,
+    },
+    paused: {
+        label: "En pause",
+        Icon: Pause,
+        color: 'bg-orange-500/90 text-orange-900',
+        priority: 6,
+    },
+    retrying: {
+        label: "Nouvelle tentative",
+        Icon: RotateCcw,
+        color: 'bg-purple-500/90 text-purple-900',
+        priority: 7,
     },
 };
 

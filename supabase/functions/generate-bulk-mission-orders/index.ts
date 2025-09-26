@@ -1,14 +1,6 @@
-// Supabase Edge Function (Deno) - bulk merge mission orders
-// Use explicit versioned remote imports for deterministic builds & local TS clarity.
-// deno-lint-ignore-file
-// @ts-nocheck
-import { serve } from 'https://deno.land/std@0.208.0/http/server.ts';
-import { PDFDocument } from 'https://esm.sh/pdf-lib@1.17.1';
+import { serve } from 'std/http/server.ts';
+import { PDFDocument } from "pdf-lib";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-
-// Minimal Deno env typing (avoids TS complaints in local editor builds not aware of Deno types)
-// If you add a deno.json with type declarations you can remove this.
-declare const Deno: { env: { get(key: string): string | undefined } };
 
 // Basic CORS (can be tightened later)
 const cors = {
@@ -36,7 +28,7 @@ async function fetchSinglePdf(matchId: string, officialId: string, token: string
     return buf;
 }
 
-serve(async (req: Request) => {
+serve(async (req) => {
     if (req.method === 'OPTIONS') {
         return new Response('ok', { headers: cors });
     }
@@ -54,9 +46,9 @@ serve(async (req: Request) => {
         const userClient = createClient(supabaseUrl, anonKey, { global: { headers: { Authorization: authHeader } } });
         const adminClient = createClient(supabaseUrl, serviceKey);
 
-        let body: unknown;
+        let body: any;
         try { body = await req.json(); } catch { body = null; }
-        const orders: OrderInput[] = (body as any)?.orders || [];
+        const orders: OrderInput[] = body?.orders || [];
         if (!Array.isArray(orders) || orders.length === 0) {
             return new Response(JSON.stringify({ error: 'orders array required' }), { headers: { ...cors, 'Content-Type': 'application/json' }, status: 400 });
         }
@@ -64,22 +56,19 @@ serve(async (req: Request) => {
         // de-duplicate
         const unique = Array.from(new Map(orders.map(o => [`${o.matchId}:${o.officialId}`, o])).values());
 
-        // Validate the JWT by calling getUser; this ensures token not expired/invalid.
-        const { data: userData, error: userErr } = await userClient.auth.getUser();
-        if (userErr || !userData?.user) {
-            console.warn('[generate-bulk-mission-orders] invalid or expired token', userErr?.message);
-            return new Response(JSON.stringify({ error: 'Invalid or expired token' }), { headers: { ...cors, 'Content-Type': 'application/json' }, status: 401 });
+        const { data: { session } } = await userClient.auth.getSession();
+        if (!session) {
+            return new Response(JSON.stringify({ error: 'No session' }), { headers: { ...cors, 'Content-Type': 'application/json' }, status: 401 });
         }
-        const sessionToken = authHeader.replace(/^Bearer\s+/i, '');
 
         const mergedPdf = await PDFDocument.create();
         let processed = 0;
         for (const o of unique) {
             try {
-                const singleBytes = await fetchSinglePdf(o.matchId, o.officialId, sessionToken, supabaseUrl);
+                const singleBytes = await fetchSinglePdf(o.matchId, o.officialId, session.access_token, supabaseUrl);
                 const src = await PDFDocument.load(singleBytes);
                 const pages = await mergedPdf.copyPages(src, src.getPageIndices());
-                pages.forEach((p: any) => mergedPdf.addPage(p));
+                pages.forEach(p => mergedPdf.addPage(p));
             } catch (e) {
                 console.error('Failed order', o, e);
             }

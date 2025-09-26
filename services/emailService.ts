@@ -1,55 +1,56 @@
 import { Match, Official, Location } from '../types';
+import { supabase } from "../lib/supabaseClient";
 
 export const generateMatchSheetHtml = (match: Match, officials: Official[], isUpdate: boolean, locations: Location[]): { subject: string, html: string, text: string } => {
-    
-    const roleTranslations: { [key: string]: string } = {
-      "Arbitre Assistant 1": "مساعد حكم 1",
-      "Arbitre Assistant 2": "مساعد حكم 2",
-      "Arbitre Central": "حكم ساحة",
-      "Délégué Adjoint": "محافظ الأمن",
-      "Délégué Principal": "محافظ اللقاء"
-    };
 
-    const translateRole = (role: string): string => {
-        return roleTranslations[role] || role;
-    };
+  const roleTranslations: { [key: string]: string } = {
+    "Arbitre Assistant 1": "مساعد حكم 1",
+    "Arbitre Assistant 2": "مساعد حكم 2",
+    "Arbitre Central": "حكم ساحة",
+    "Délégué Adjoint": "محافظ الأمن",
+    "Délégué Principal": "محافظ اللقاء"
+  };
+
+  const translateRole = (role: string): string => {
+    return roleTranslations[role] || role;
+  };
 
 
-    const assignedOfficials = match.assignments
-        .map(a => officials.find(o => o.id === a.officialId))
-        .filter((o): o is Official => o !== undefined);
+  const assignedOfficials = match.assignments
+    .map(a => officials.find(o => o.id === a.officialId))
+    .filter((o): o is Official => o !== undefined);
 
-    const mainOfficial = assignedOfficials.find(o => o.category.toLowerCase().includes('délégué')) || assignedOfficials[0];
-    
-    // Format date with Arabic locale
-    const matchDate = new Date(match.matchDate!);
-    const formattedDate = matchDate.toLocaleDateString('ar-DZ', { 
-        weekday: 'long', 
-        day: 'numeric', 
-        month: 'long',
-        year: 'numeric'
-    });
-    
-// FIX: Use locationId and the locations array to format the location string.
-    const locationMap = new Map(locations.map(loc => [loc.id, loc]));
-    const formatLocation = (locationId: string | null): string => {
-        if (!locationId) return 'الموقع غير محدد';
-        const location = locationMap.get(locationId);
-        if (!location) return 'معرف غير معروف';
-        if (location.wilaya_ar && location.commune_ar) {
-            return `${location.wilaya_ar} - ${location.commune_ar}`;
-        }
-        return [location.wilaya, location.daira, location.commune].filter(Boolean).join(' / ');
-    };
-    const stadiumLocationString = formatLocation(match.stadium?.locationId || null);
+  const mainOfficial = assignedOfficials.find(o => o.category.toLowerCase().includes('délégué')) || assignedOfficials[0];
 
-    const stadiumInfo = match.stadium ? `${match.stadium.nameAr}، ${stadiumLocationString}` : 'المكان غير محدد';
-    const stadiumHtml = match.stadium ? `${match.stadium.nameAr}<br>${stadiumLocationString}` : 'المكان غير محدد';
-    const mapsLink = match.stadium && match.stadium.name && stadiumLocationString !== 'الموقع غير محدد' ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(match.stadium.name + ', ' + stadiumLocationString)}` : '';
+  // Format date with Arabic locale
+  const matchDate = new Date(match.matchDate!);
+  const formattedDate = matchDate.toLocaleDateString('ar-DZ', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric'
+  });
 
-    const subject = `${isUpdate ? '🔄 تحديث: ' : '📋 '}تعيين - ${match.homeTeam.name} ضد ${match.awayTeam.name}`;
+  // FIX: Use locationId and the locations array to format the location string.
+  const locationMap = new Map(locations.map(loc => [loc.id, loc]));
+  const formatLocation = (locationId: string | null): string => {
+    if (!locationId) return 'الموقع غير محدد';
+    const location = locationMap.get(locationId);
+    if (!location) return 'معرف غير معروف';
+    if (location.wilaya_ar && location.commune_ar) {
+      return `${location.wilaya_ar} - ${location.commune_ar}`;
+    }
+    return [location.wilaya, location.daira, location.commune].filter(Boolean).join(' / ');
+  };
+  const stadiumLocationString = formatLocation(match.stadium?.locationId || null);
 
-    const text = `
+  const stadiumInfo = match.stadium ? `${match.stadium.nameAr}، ${stadiumLocationString}` : 'المكان غير محدد';
+  const stadiumHtml = match.stadium ? `${match.stadium.nameAr}<br>${stadiumLocationString}` : 'المكان غير محدد';
+  const mapsLink = match.stadium && match.stadium.name && stadiumLocationString !== 'الموقع غير محدد' ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(match.stadium.name + ', ' + stadiumLocationString)}` : '';
+
+  const subject = `${isUpdate ? '🔄 تحديث: ' : '📋 '}تعيين - ${match.homeTeam.name} ضد ${match.awayTeam.name}`;
+
+  const text = `
 ${isUpdate ? '⚠️ تحديث التعيين\n\n' : ''}السلام عليكم،
 
 تم تعيينكم للإشراف على المباراة التالية:
@@ -70,12 +71,12 @@ ${match.homeTeam.name} ضد ${match.awayTeam.name}
 ${match.assignments.map(a => {
     const official = officials.find(o => o.id === a.officialId);
     return `• ${translateRole(a.role)}: ${official?.firstNameAr + ' ' + official?.lastNameAr || 'غير محدد'}`;
-}).join('\n')}
+  }).join('\n')}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📞 التنسيق
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-المسؤول: ${mainOfficial?.firstNameAr + ' '  + mainOfficial?.lastNameAr  || 'غير محدد'}
+المسؤول: ${mainOfficial?.firstNameAr + ' ' + mainOfficial?.lastNameAr || 'غير محدد'}
 الهاتف: ${mainOfficial?.phone || 'غير محدد'}
 
 يرجى الاتصال بالمسؤول لتنسيق وصولكم.
@@ -84,7 +85,7 @@ ${match.assignments.map(a => {
 إدارة الحكام
     `;
 
-    const html = `
+  const html = `
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -472,8 +473,8 @@ ${match.assignments.map(a => {
         </h3>
         <ul class="official-list">
           ${match.assignments.map(a => {
-            const official = officials.find(o => o.id === a.officialId);
-            return `
+    const official = officials.find(o => o.id === a.officialId);
+    return `
               <li class="official-item">
                 <div>
                  <div class="official-role">${translateRole(a.role)}</div>
@@ -483,7 +484,7 @@ ${match.assignments.map(a => {
                 </div>
               </li>
             `;
-          }).join('')}
+  }).join('')}
         </ul>
       </div>
       
@@ -510,5 +511,24 @@ ${match.assignments.map(a => {
 </html>
     `;
 
-    return { subject, html, text };
+  return { subject, html, text };
 };
+
+export async function createBulkEmailJob(
+  matchIds: string[],
+  subject: string,
+  content: string
+): Promise<any> {
+  const { data, error } = await supabase.functions.invoke(
+    "create-bulk-email-job",
+    {
+      body: { matchIds, subject, content },
+    }
+  );
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}

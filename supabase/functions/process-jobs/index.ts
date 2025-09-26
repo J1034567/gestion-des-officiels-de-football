@@ -596,7 +596,7 @@ const handlers: Record<string, (slog: Slog, supabase: SupabaseClient, job: JobRo
                         });
                         if (!resp.ok) {
                             const body = await resp.text();
-                            throw new Error(`sendgrid_error_${resp.status}: ${body.slice(0,500)}`);
+                            throw new Error(`sendgrid_error_${resp.status}: ${body.slice(0, 500)}`);
                         }
                         return { provider: 'sendgrid' };
                     } else if (resendKey) {
@@ -624,7 +624,7 @@ const handlers: Record<string, (slog: Slog, supabase: SupabaseClient, job: JobRo
                         });
                         if (!resp.ok) {
                             const body = await resp.text();
-                            throw new Error(`resend_error_${resp.status}: ${body.slice(0,500)}`);
+                            throw new Error(`resend_error_${resp.status}: ${body.slice(0, 500)}`);
                         }
                         return { provider: 'resend' };
                     } else {

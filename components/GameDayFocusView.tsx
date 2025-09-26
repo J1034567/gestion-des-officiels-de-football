@@ -32,8 +32,8 @@ import { downloadBlob } from "../services/pdfService";
 import {
   getBulkMissionOrdersPdf,
   MissionOrderRequest,
-  missionOrdersJob,
 } from "../services/missionOrderService";
+import { missionOrderBatch } from "../services/missionOrderService";
 import AlertModal from "./AlertModal";
 import DownloadIcon from "./icons/DownloadIcon";
 import { exportGameDaySummaryToExcel } from "../services/exportService";
@@ -637,49 +637,49 @@ export const GameDayFocusView: React.FC<GameDayFocusViewProps> = ({
         // Poll with backoff-ish fixed delay
         let firstAttempt = true;
         while (!cancelled) {
+          let job;
           try {
-            const job = await missionOrdersJob.fetch(meta.batchHash);
-            firstAttempt = false;
-            if (job.status === "completed" && job.artifactUrl) {
-              const resp = await fetch(job.artifactUrl);
-              if (resp.ok) {
-                const blob = await resp.blob();
-                if (!cancelled) {
-                  downloadBlob(blob, meta.fileName || "Ordres_de_Mission.pdf");
-                }
-              }
-              break;
-            }
-            if (job.status === "failed") {
-              setAlertInfo({
-                title: "Génération Echouée",
-                message:
-                  job.error_code ||
-                  "La génération du lot a échoué côté serveur.",
-              });
-              break;
-            }
-            if (Date.now() - meta.startedAt > MAX_WINDOW_MS) {
-              setAlertInfo({
-                title: "Expiration",
-                message:
-                  "La génération a pris trop de temps. Veuillez relancer.",
-              });
-              break;
-            }
-            await new Promise((r) => setTimeout(r, 1500));
-          } catch (err) {
+            job = await missionOrderBatch.get(meta.batchHash);
+          } catch (err: any) {
             if (firstAttempt) {
               setAlertInfo({
                 title: "Reprise Impossible",
                 message:
-                  "Le suivi du lot a échoué (jobs introuvable ou droits insuffisants). Veuillez relancer.",
+                  "Le suivi du lot a échoué (fonction indisponible ou payload invalide). Veuillez relancer.",
               });
-              break;
+              break; // abort loop; will cleanup below
             }
             console.warn("Polling error (will retry)", err);
             await new Promise((r) => setTimeout(r, 2000));
+            continue;
           }
+          firstAttempt = false;
+          if (job.status === "completed" && job.artifactUrl) {
+            const resp = await fetch(job.artifactUrl);
+            if (resp.ok) {
+              const blob = await resp.blob();
+              if (!cancelled) {
+                downloadBlob(blob, meta.fileName || "Ordres_de_Mission.pdf");
+              }
+            }
+            break;
+          }
+          if (job.status === "failed") {
+            setAlertInfo({
+              title: "Génération Echouée",
+              message:
+                job.error || "La génération du lot a échoué côté serveur.",
+            });
+            break;
+          }
+          if (Date.now() - meta.startedAt > MAX_WINDOW_MS) {
+            setAlertInfo({
+              title: "Expiration",
+              message: "La génération a pris trop de temps. Veuillez relancer.",
+            });
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 1500));
         }
       } catch (err) {
         console.warn("Resume polling failed", err);

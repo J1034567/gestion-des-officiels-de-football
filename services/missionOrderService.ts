@@ -92,12 +92,10 @@ export async function getBulkMissionOrdersPdf(
         try { onProgress({ total: unique.length, completed: 0 }); } catch {/* ignore */ }
     }
 
-    // Attempt unified jobs system path (replaces legacy mission_order_batches) before any legacy/server/client fallback
+    // Attempt idempotent job-based path (Phase 3) before legacy server threshold logic
     const classifyError = (e: any): { category: string; message: string } => {
         const status = e?.status || e?.code || e?.response?.status;
-        const msg = (e?.message || '').toLowerCase();
-        if (msg === 'aborted') return { category: 'aborted', message: 'Opération annulée' };
-        if (msg.includes('no active session')) return { category: 'auth', message: 'Session absente ou expirée.' };
+        if (e?.message === 'Aborted') return { category: 'aborted', message: 'Opération annulée' };
         if (status === 401) return { category: 'auth', message: 'Non authentifié (401) pour la génération idempotente.' };
         if (status === 403) return { category: 'forbidden', message: 'Accès refusé (403) sur la génération.' };
         if (status === 404) return { category: 'not_found', message: 'Ressource de lot introuvable (404).' };
@@ -111,52 +109,45 @@ export async function getBulkMissionOrdersPdf(
     try {
         const batchHash = await hashMissionOrders(unique);
         options?.onJobHash?.(batchHash);
-        const job = await enqueueUnifiedBulkPdf(batchHash, unique);
-        if (job.status === 'completed' && job.artifactUrl) {
-            const resp = await fetch(job.artifactUrl);
+        const existing = await startOrReuseMissionOrderJob(batchHash, unique);
+        if (existing.status === 'completed' && existing.artifactUrl) {
+            const resp = await fetch(existing.artifactUrl);
             if (resp.ok) return await resp.blob();
-        } else if (job.status === 'pending' || job.status === 'running') {
-            // Poll jobs table via lightweight RPC (select) instead of legacy batch endpoints
+        } else if (existing.status === 'processing' || existing.status === 'pending') {
+            // Poll until completion or timeout (60s) but fallback early if never leaves 'pending'
             const deadline = Date.now() + 60_000;
-            const initialWaitKick = Date.now() + 1_500; // first possible kick
-            let kicked = false;
+            const pendingFallbackDeadline = Date.now() + 4_000; // if still pending after 4s assume processor not running
+            let sawProcessing = existing.status === 'processing';
             while (Date.now() < deadline) {
                 if (options?.signal?.aborted) throw new Error('Aborted');
                 await new Promise(r => setTimeout(r, 1500));
-                const latest = await fetchUnifiedJob(job.id);
+                const latest = await getMissionOrderJob(batchHash);
+                if (!sawProcessing && latest.status === 'processing') sawProcessing = true;
                 if (latest.status === 'completed' && latest.artifactUrl) {
                     const resp = await fetch(latest.artifactUrl);
                     if (resp.ok) return await resp.blob();
-                    break;
+                    break; // artifact fetch failed -> fallback
                 }
                 if (latest.status === 'failed') {
-                    console.warn('[MissionOrders][unified-job] failed; fallback to client merge', latest.error_code);
+                    console.warn('Mission order batch job failed; falling back to legacy path', latest.error);
                     break;
                 }
-                if (!kicked && Date.now() > initialWaitKick && (latest.status === 'pending' || latest.status === 'running') && latest.progress < 5) {
-                    kicked = true;
-                    // Fire & forget unified processor
-                    supabase.functions.invoke('process-jobs', { body: {} })
-                        .catch(err => console.debug('[MissionOrders][unified-job] processor kick failed (non-fatal)', err?.message || err));
+                if (!sawProcessing && Date.now() > pendingFallbackDeadline) {
+                    console.info('Mission order batch stuck in pending (>4s). Falling back to legacy bulk/client merge. Ensure process-mission-order-batches function runs.');
+                    break;
                 }
             }
         }
     } catch (e: any) {
         const info = classifyError(e);
-        console.warn('[MissionOrders][unified-job] path error', info, e);
+        console.warn('[MissionOrders][job-path] échec', info, e);
     }
 
-    // Legacy server bulk path retained temporarily only if large set and unified jobs path didn't produce
     if (unique.length > LARGE_THRESHOLD) {
         // Attempt server-side generation first
         for (let attempt = 1; attempt <= 2; attempt++) {
             try {
                 const { data: { session } } = await supabase.auth.getSession();
-
-                if (!session) {
-                    console.warn('[MissionOrders][server-bulk] skip: no session (using client merge)');
-                    // passer direct à la fusion client ou tenter uniquement path idempotent si accessible
-                }
                 if (!session) throw new Error('No active session');
                 const { data, error } = await supabase.functions.invoke('generate-bulk-mission-orders', {
                     body: { orders: unique }
@@ -223,47 +214,53 @@ export function clearMissionOrderCache() {
 }
 
 // ---------------------------
-// Unified Jobs helpers (replacement for legacy mission_order_batches)
+// Phase 3: Job-based idempotent batch generation helpers
 // ---------------------------
 
-interface UnifiedJobRow {
-    id: string;
-    type: string;
-    status: 'pending' | 'running' | 'completed' | 'failed';
-    progress: number;
+interface MissionOrderJobRecord {
+    hash: string;
+    status: 'pending' | 'processing' | 'completed' | 'failed';
     artifact_path: string | null;
-    artifact_type: string | null;
-    error_code: string | null;
+    artifact_url?: string | null; // convenience from edge fn
+    error: string | null;
+    created_at?: string;
+    updated_at?: string;
 }
 
-async function enqueueUnifiedBulkPdf(hash: string, orders: MissionOrderRequest[]) {
+interface MissionOrderJobClientView {
+    status: MissionOrderJobRecord['status'];
+    artifactUrl?: string;
+    error?: string | null;
+}
+
+async function startOrReuseMissionOrderJob(hash: string, orders: MissionOrderRequest[]): Promise<MissionOrderJobClientView> {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) throw new Error('No active session');
-    // Use new enqueue edge function with dedupe key generated from hash to ensure reuse
-    const { data, error } = await supabase.functions.invoke('enqueue-mission-orders-bulk-pdf', {
-        body: { orders, dedupe: true }
+    const { data, error } = await supabase.functions.invoke('start-mission-order-batch', {
+        body: { hash, orders }
     });
     if (error) throw error;
-    // We can't map hash directly but dedupe ensures reuse; return job id & initial status
-    const jobId = data.jobId;
-    const latest = await fetchUnifiedJob(jobId);
-    return { id: jobId, status: latest.status, artifactUrl: latest.artifactUrl, progress: latest.progress };
+    return {
+        status: data.status,
+        artifactUrl: data.artifactUrl,
+        error: data.error,
+    };
 }
 
-async function fetchUnifiedJob(id: string): Promise<{ status: UnifiedJobRow['status']; artifactUrl?: string | null; error_code?: string | null; progress: number; }> {
-    // Query jobs row & if artifact present sign URL
-    const { data: row, error } = await supabase.from('jobs').select('id,status,artifact_path,artifact_type,error_code,progress').eq('id', id).maybeSingle();
+async function getMissionOrderJob(hash: string): Promise<MissionOrderJobClientView> {
+    const { data, error } = await supabase.functions.invoke('get-mission-order-batch', {
+        body: { hash }
+    });
     if (error) throw error;
-    if (!row) throw new Error('not_found');
-    let artifactUrl: string | null = null;
-    if (row.artifact_path && row.artifact_type === 'pdf') {
-        const { data: signed, error: signErr } = await supabase.storage.from('mission_orders').createSignedUrl(row.artifact_path, 60 * 60);
-        if (!signErr) artifactUrl = signed?.signedUrl || null;
-    }
-    return { status: row.status, artifactUrl, error_code: row.error_code, progress: row.progress };
+    return {
+        status: data.status,
+        artifactUrl: data.artifactUrl,
+        error: data.error,
+    };
 }
 
-export const missionOrdersJob = {
-    enqueue: enqueueUnifiedBulkPdf,
-    fetch: fetchUnifiedJob,
+// Exported for potential external polling (UI components)
+export const missionOrderBatch = {
+    startOrReuse: startOrReuseMissionOrderJob,
+    get: getMissionOrderJob,
 };
