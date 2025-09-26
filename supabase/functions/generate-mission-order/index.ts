@@ -1,3 +1,5 @@
+// deno-lint-ignore-file no-explicit-any
+// @ts-nocheck
 import { serve } from "std/http/server.ts";
 import { PDFDocument, PDFFont, StandardFonts, rgb, degrees } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
@@ -643,30 +645,45 @@ async function createDataSnapshotAndHash(missionDataForPDF: object) {
 }
 
 // Main server logic
-serve(async (req) => {
+serve(async (req: Request) => {
+  const cid = req.headers.get('x-correlation-id') || crypto.randomUUID();
+  const slog = (level: string, event: string, meta: Record<string, any> = {}) => {
+    try {
+      console.log(JSON.stringify({ ts: new Date().toISOString(), cid, fn: 'generate-mission-order', level, event, ...meta }));
+    } catch (e) {
+      console.log(`[log-fallback] ${level} ${event}`);
+    }
+  };
+  slog('info', 'request.start', { method: req.method, path: '/generate-mission-order' });
   if (req.method === 'OPTIONS') {
+    slog('info', 'preflight');
     return new Response('ok', { headers: config.corsHeaders });
   }
 
-  const supabase = createClient(
-    Deno.env.get('SUPABASE_URL')!,
-    Deno.env.get('SUPABASE_ANON_KEY')!,
-    { global: { headers: { Authorization: req.headers.get('Authorization')! } } }
-  );
+  const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+  const anonKey = Deno.env.get('SUPABASE_ANON_KEY')!;
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+  const authHeader = req.headers.get('Authorization') || '';
+  const isBearer = /^Bearer /.test(authHeader);
+  const tokenPartCount = isBearer ? authHeader.replace(/^Bearer\s+/, '').split('.').length : 0;
+  const looksLikeJwt = isBearer && tokenPartCount === 3; // heuristic
 
-  const supabaseAdmin = createClient(
-    Deno.env.get('SUPABASE_URL')!,
-    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-  );
+  const supabaseUser = looksLikeJwt
+    ? createClient(supabaseUrl, anonKey, { global: { headers: { Authorization: authHeader } } })
+    : null;
+  const supabaseAdmin = createClient(supabaseUrl, serviceKey);
+  // Decide which client to use for data fetch (user context if valid JWT else admin)
+  const dbClient = supabaseUser || supabaseAdmin;
 
   try {
     // Better request body parsing with error handling
-    let matchId, officialId;
+    let matchId, officialId, returnBase64 = false;
 
     try {
       const body = await req.json();
       matchId = body.matchId;
       officialId = body.officialId;
+      returnBase64 = !!body.returnBase64;
     } catch (parseError) {
       console.error('Failed to parse request body:', parseError);
       return new Response(
@@ -693,13 +710,13 @@ serve(async (req) => {
     }
 
     // 1. Fetch CURRENT data using our new RPC function
-    const { data: details, error: rpcError } = await supabase.rpc('get_mission_order_details', {
+    const { data: details, error: rpcError } = await dbClient.rpc('get_mission_order_details', {
       p_match_id: matchId,
       p_official_id: officialId
     });
 
     if (rpcError || !details) {
-      console.error('RPC Error:', rpcError);
+      slog('error', 'rpc.failure', { matchId, officialId, error: rpcError?.message });
       return new Response(
         JSON.stringify({
           error: `Could not fetch details for match ${matchId}.`
@@ -739,7 +756,7 @@ serve(async (req) => {
     const currentDataHash = await createDataSnapshotAndHash(missionData);
 
     // 4. Check for the most recent order and compare hashes
-    const { data: latestOrder } = await supabase
+    const { data: latestOrder } = await dbClient
       .from('mission_orders')
       .select('pdf_storage_path, data_hash')
       .eq('match_id', matchId)
@@ -747,29 +764,33 @@ serve(async (req) => {
       .order('created_at', { ascending: false })
       .limit(1)
       .single();
-    console.log('Latest order fetched:', latestOrder);
+    slog('debug', 'latest_order.inspect', { latest: !!latestOrder, hasPath: !!latestOrder?.pdf_storage_path });
 
     if (latestOrder && latestOrder.data_hash === currentDataHash && latestOrder.pdf_storage_path) {
-      console.log(`Data unchanged. Returning existing PDF for match ${matchId}.`);
+      slog('info', 'reuse.cached_pdf', { matchId, officialId, orderNumber: latestOrder.pdf_storage_path });
       const { data: fileData, error: downloadError } = await supabaseAdmin.storage
         .from('mission_orders')
         .download(latestOrder.pdf_storage_path);
       if (downloadError) throw downloadError;
-
-      return new Response(fileData as BodyInit, {
-        headers: {
-          ...config.corsHeaders,  // Add this
-          'Content-Type': 'application/pdf'
-        }
-      });
+      if (returnBase64) {
+        const buf = await fileData.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        const base64 = base64FromBytes(bytes);
+        slog('info', 'response.cached_base64', { bytes: bytes.length });
+        return new Response(JSON.stringify({ pdfBase64: base64, reused: true }), { headers: { ...config.corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      return new Response(fileData as BodyInit, { headers: { ...config.corsHeaders, 'Content-Type': 'application/pdf' } });
     }
 
     // 5. If data changed or no order exists, generate a new one
-    console.log(`Data changed or no prior order. Generating new PDF for match ${matchId}.`);
+    slog('info', 'generate.new_pdf', { matchId, officialId });
 
 
-    const { data: newOrderNumber, error: sequenceError } = await supabase.rpc('nextval', { p_seq_name: 'mission_order_serial' });
-    if (sequenceError) throw sequenceError;
+    const { data: newOrderNumber, error: sequenceError } = await dbClient.rpc('nextval', { p_seq_name: 'mission_order_serial' });
+    if (sequenceError) {
+      slog('error', 'sequence.error', { error: sequenceError.message });
+      throw sequenceError;
+    }
 
     const pdfDataWithOrderNumber = { ...missionData, orderNumber: newOrderNumber.toString() };
 
@@ -785,7 +806,10 @@ serve(async (req) => {
       .single();
 
 
-    if (insertError) throw insertError;
+    if (insertError) {
+      slog('error', 'mission_orders.insert_failed', { error: insertError.message });
+      throw insertError;
+    }
     const verificationId = newOrder.id;
 
 
@@ -808,7 +832,10 @@ serve(async (req) => {
     const { error: uploadError } = await supabaseAdmin.storage
       .from('mission_orders')
       .upload(pdfStoragePath, pdfBytes, { contentType: 'application/pdf', upsert: true });
-    if (uploadError) throw uploadError;
+    if (uploadError) {
+      slog('error', 'storage.upload_failed', { error: uploadError.message, path: pdfStoragePath });
+      throw uploadError;
+    }
 
 
     // 6. Update the record with the PDF storage path
@@ -816,19 +843,22 @@ serve(async (req) => {
       .from('mission_orders')
       .update({ pdf_storage_path: pdfStoragePath })
       .eq('id', verificationId);
-    if (updateError) throw updateError; // Consider how to handle cleanup if this fails
+    if (updateError) {
+      slog('error', 'mission_orders.update_failed', { error: updateError.message, id: verificationId });
+      throw updateError; // cleanup strategy could be added
+    }
 
 
-    return new Response(pdfBytes as BodyInit, {
-      headers: {
-        ...config.corsHeaders,
-        'Content-Type': 'application/pdf',
-        'Content-Disposition': `attachment; filename="mission_order_${newOrderNumber}.pdf"`
-      }
-    });
+    if (returnBase64) {
+      const base64 = base64FromBytes(pdfBytes);
+      slog('info', 'response.success_base64', { bytes: pdfBytes.byteLength, path: pdfStoragePath, orderNumber: newOrderNumber });
+      return new Response(JSON.stringify({ pdfBase64: base64, reused: false }), { headers: { ...config.corsHeaders, 'Content-Type': 'application/json' } });
+    }
+    slog('info', 'response.success', { bytes: pdfBytes.byteLength, path: pdfStoragePath, orderNumber: newOrderNumber });
+    return new Response(pdfBytes as BodyInit, { headers: { ...config.corsHeaders, 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="mission_order_${newOrderNumber}.pdf"` } });
 
-  } catch (error) {
-    console.error('Error in generate-mission-order function:', error);
+  } catch (error: any) {
+    slog('error', 'unhandled.exception', { error: error?.message });
     return new Response(
       JSON.stringify({ error: error.message }),
       {
@@ -841,3 +871,13 @@ serve(async (req) => {
     );
   }
 });
+
+function base64FromBytes(bytes: Uint8Array): string {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    const sub = bytes.subarray(i, i + chunk);
+    binary += String.fromCharCode.apply(null, Array.from(sub));
+  }
+  return btoa(binary);
+}

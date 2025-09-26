@@ -6,6 +6,7 @@ import React, {
   useState,
   useCallback,
 } from "react";
+import { supabase } from "../lib/supabaseClient";
 
 /** Job Center Types */
 export type JobType = "mission_orders" | "emails";
@@ -24,10 +25,19 @@ export interface JobRecord {
   createdAt: number;
   updatedAt: number;
   status: JobStatus;
-  total?: number;
-  completed?: number;
-  artifactUrl?: string; // resulting file if any
-  error?: string | null;
+  total?: number; // legacy progress total (still supported)
+  completed?: number; // legacy progress completed (still supported)
+  artifactUrl?: string; // resulting file if any (signed url)
+  artifactPath?: string; // internal storage path (new unified jobs)
+  artifactType?: string; // 'pdf' | 'zip' | etc.
+  phase?: string | null; // current phase name
+  phaseProgress?: number; // 0-100 progress within current phase
+  progress?: number; // server-computed overall progress (override legacy calc when present)
+  attempts?: number; // retry attempts (server side)
+  priority?: number; // scheduling priority
+  errorCode?: string | null; // standardized error code
+  error?: string | null; // human-friendly message
+  dedupeKey?: string | null; // idempotency key
   meta?: Record<string, any>;
 }
 
@@ -143,7 +153,8 @@ export const JobCenterProvider: React.FC<{ children: React.ReactNode }> = ({
     setJobs((prev) => {
       const next = prev.map((j) => {
         if (j.id === id) {
-          updated = { ...j, ...patch, updatedAt: Date.now() };
+          // Merge while keeping unspecified new fields from previous state
+          updated = { ...j, ...patch, updatedAt: Date.now() } as JobRecord;
           return updated;
         }
         return j;
@@ -289,6 +300,81 @@ export const JobCenterProvider: React.FC<{ children: React.ReactNode }> = ({
       {children}
     </JobCenterContext.Provider>
   );
+};
+
+// Helper to map DB row (snake_case) to JobRecord patch (camelCase)
+function mapDbRowToJobRecord(row: any): Partial<JobRecord> | null {
+  if (!row?.id) return null;
+  const statusMap: Record<string, JobStatus> = {
+    pending: "pending",
+    running: "processing",
+    processing: "processing",
+    completed: "completed",
+    failed: "failed",
+    cancelling: "processing", // could expose distinct state later
+    cancelled: "cancelled",
+  };
+  const rec: Partial<JobRecord> = {
+    id: row.id,
+    status: statusMap[row.status] || "pending",
+    progress: typeof row.progress === "number" ? row.progress : undefined,
+    phase: row.phase ?? undefined,
+    phaseProgress:
+      typeof row.phase_progress === "number" ? row.phase_progress : undefined,
+    artifactPath: row.artifact_path ?? undefined,
+    artifactType: row.artifact_type ?? undefined,
+    errorCode: row.error_code ?? undefined,
+    attempts: typeof row.attempts === "number" ? row.attempts : undefined,
+    priority: typeof row.priority === "number" ? row.priority : undefined,
+    dedupeKey: row.dedupe_key ?? undefined,
+    // Keep legacy label derivation minimal if not set
+  };
+  return rec;
+}
+
+// Attach realtime subscription inside a dedicated component to avoid re-subscribing on context updates
+export const JobRealtimeBridge: React.FC = () => {
+  const { update, register, get } = useJobCenter();
+  useEffect(() => {
+    const channel = supabase.channel("jobs-changes").on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "jobs",
+      },
+      (payload) => {
+        const newRow: any = payload.new || payload.old;
+        if (!newRow) return;
+        const patch = mapDbRowToJobRecord(newRow);
+        if (!patch) return;
+        const existing = get(patch.id!);
+        if (!existing) {
+          // Register minimal record; caller code may enrich label later
+          register({
+            id: patch.id!,
+            type: (newRow.type as JobType) || "mission_orders",
+            label: newRow.type || patch.id!,
+            status: patch.status as JobStatus,
+            meta: { source: "realtime" },
+          });
+          // Then apply details
+          update(patch.id!, patch as any);
+        } else {
+          update(patch.id!, patch as any);
+        }
+      }
+    );
+    channel.subscribe();
+    return () => {
+      try {
+        channel.unsubscribe();
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [update, register, get]);
+  return null;
 };
 
 export function useJobCenter() {

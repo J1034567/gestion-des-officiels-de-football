@@ -1,8 +1,15 @@
 // src/components/JobRow.tsx
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import { JobRecord } from "../hooks/useJobCenter";
 import { STATUS_CONFIG, formatDuration } from "./job-center.config";
-import { Download, RefreshCw, Trash2, Zap } from "lucide-react";
+import {
+  Download,
+  RefreshCw,
+  Trash2,
+  ChevronDown,
+  ChevronRight,
+} from "lucide-react";
+import { JobItemsList } from "./JobItemsList";
 
 interface JobRowProps {
   job: JobRecord;
@@ -23,27 +30,42 @@ const IconButton: React.FC<React.ComponentProps<"button">> = ({
 
 export const JobRow: React.FC<JobRowProps> = React.memo(
   ({ job, onRemove, onRetry }) => {
+    const [open, setOpen] = useState(false);
     const {
       label: statusLabel,
       Icon: StatusIcon,
       color: statusColor,
     } = STATUS_CONFIG[job.status];
 
-    const { progressPct, duration } = useMemo(() => {
-      const progress =
-        job.total && job.total > 0
-          ? Math.min(100, Math.round(((job.completed || 0) / job.total) * 100))
-          : job.status === "completed"
-          ? 100
-          : 0;
-
+    const { progressPct, phasePct, duration } = useMemo(() => {
+      let overall = typeof job.progress === "number" ? job.progress : undefined;
+      if (overall == null) {
+        overall =
+          job.total && job.total > 0
+            ? Math.min(
+                100,
+                Math.round(((job.completed || 0) / job.total) * 100)
+              )
+            : job.status === "completed"
+            ? 100
+            : 0;
+      }
+      const inner =
+        typeof job.phaseProgress === "number" ? job.phaseProgress : undefined;
       const dur =
         job.status === "completed" || job.status === "failed"
           ? job.updatedAt - job.createdAt
           : Date.now() - job.createdAt;
-
-      return { progressPct: progress, duration: dur };
-    }, [job.status, job.total, job.completed, job.createdAt, job.updatedAt]);
+      return { progressPct: overall, phasePct: inner, duration: dur };
+    }, [
+      job.status,
+      job.total,
+      job.completed,
+      job.createdAt,
+      job.updatedAt,
+      job.progress,
+      job.phaseProgress,
+    ]);
 
     const progressBarColor =
       job.status === "failed"
@@ -63,7 +85,13 @@ export const JobRow: React.FC<JobRowProps> = React.memo(
           {/* Type & Scope */}
           <div className="col-span-4 flex flex-col gap-1 text-xs truncate">
             <div className="font-semibold truncate" title={job.label}>
-              {job.label}
+              <button
+                onClick={() => setOpen((o) => !o)}
+                className="inline-flex items-center gap-1 hover:text-blue-300 transition-colors"
+              >
+                {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                {job.label}
+              </button>
             </div>
             <div
               className="text-gray-400 truncate"
@@ -76,16 +104,40 @@ export const JobRow: React.FC<JobRowProps> = React.memo(
             </div>
           </div>
 
-          {/* Progress */}
+          {/* Progress (overall + phase overlay) */}
           <div className="col-span-3 flex flex-col gap-1">
-            <div className="h-2 bg-gray-700 rounded overflow-hidden">
+            <div className="h-2 bg-gray-700 rounded overflow-hidden relative">
               <div
                 className={`h-full transition-all duration-300 ease-out ${progressBarColor}`}
                 style={{ width: `${progressPct}%` }}
               />
+              {phasePct != null &&
+                phasePct < 100 &&
+                job.status === "processing" && (
+                  <div
+                    className="absolute top-0 left-0 h-full bg-white/30 mix-blend-overlay transition-all duration-300"
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        progressPct * (phasePct / 100)
+                      )}%`,
+                    }}
+                  />
+                )}
             </div>
             <div className="text-[10px] text-gray-400 flex justify-between">
-              <span>{progressPct}%</span>
+              <span>
+                {progressPct}%
+                {job.phase && job.status === "processing" && (
+                  <>
+                    <span className="mx-1 text-gray-600">|</span>
+                    <span className="text-gray-300">
+                      {job.phase}
+                      {phasePct != null ? ` ${phasePct}%` : ""}
+                    </span>
+                  </>
+                )}
+              </span>
               <span>{formatDuration(duration)}</span>
             </div>
           </div>
@@ -105,9 +157,9 @@ export const JobRow: React.FC<JobRowProps> = React.memo(
 
           {/* Actions */}
           <div className="col-span-1 flex items-center justify-end gap-1">
-            {job.artifactUrl && (
+            {(job.artifactUrl || job.artifactPath) && (
               <a
-                href={job.artifactUrl}
+                href={job.artifactUrl || job.artifactPath || "#"}
                 target="_blank"
                 rel="noreferrer"
                 title="Télécharger l'artefact"
@@ -139,12 +191,18 @@ export const JobRow: React.FC<JobRowProps> = React.memo(
             )}
           </div>
         </div>
-        {job.error && (
+        {(job.error || job.errorCode) && (
           <div
             className="mt-1.5 pl-1 text-xs text-red-400/90 line-clamp-2 bg-red-900/20 p-2 rounded-md"
-            title={job.error}
+            title={job.error || job.errorCode || undefined}
           >
-            <span className="font-semibold">Erreur:</span> {job.error}
+            <span className="font-semibold">Erreur:</span>{" "}
+            {job.error || job.errorCode}
+          </div>
+        )}
+        {open && (
+          <div className="mt-2">
+            <JobItemsList jobId={job.id} />
           </div>
         )}
       </div>
