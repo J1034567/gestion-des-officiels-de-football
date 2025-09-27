@@ -28,13 +28,15 @@ import QuickEmailModal from "./QuickEmailModal";
 import PaperAirplaneIcon from "./icons/PaperAirplaneIcon";
 import PrinterIcon from "./icons/PrinterIcon";
 // Legacy mission order generation utilities removed in new architecture (handled by backend workers)
-import { MissionOrderRequest } from "../services/missionOrderService"; // Type only
+// Local lightweight type replacing legacy MissionOrderService import (legacy service pruned)
+type MissionOrderRequest = { matchId: string; officialId: string };
 import AlertModal from "./AlertModal";
 import DownloadIcon from "./icons/DownloadIcon";
 import { exportGameDaySummaryToExcel } from "../services/exportService";
 import LocationPinIcon from "./icons/LocationPinIcon";
 import { useJobCenter } from "../hooks/useJobCenter";
 import { jobService } from "../services/jobService";
+import { JobKinds } from "../supabase/functions/_shared/jobKinds";
 
 // --- UTILS & HOOKS ---
 
@@ -776,7 +778,7 @@ export const GameDayFocusView: React.FC<GameDayFocusViewProps> = ({
     if (existing && ["pending", "processing"].includes(existing.status)) return;
     try {
       await jobService.enqueueJob({
-        type: "mission_orders.email_bulk",
+        type: JobKinds.MatchSheetsBulkEmail,
         label: `Envoi feuilles (${eligibleMatchIds.length})`,
         total: eligibleMatchIds.length,
         payload: {

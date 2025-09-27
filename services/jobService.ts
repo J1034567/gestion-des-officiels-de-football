@@ -1,11 +1,14 @@
 import { supabase } from "../lib/supabaseClient";
 import type { JobRecord } from "../hooks/useJobCenter";
+import { JobKinds, type JobKind, type JobPayloadFor } from "../supabase/functions/_shared/jobKinds";
 
-export interface EnqueueJobPayload {
-  type: string;
+// Generic, strongly typed enqueue payload
+export interface EnqueueJobPayload<K extends JobKind = JobKind> {
+  type: K;
   label: string;
-  payload?: Record<string, any>;
-  total?: number;
+  payload: JobPayloadFor<K>;
+  total?: number; // optional overall item count for progress bars
+  dedupe_key?: string; // optional key to reuse an existing identical job
 }
 
 export const jobService = {
@@ -13,7 +16,7 @@ export const jobService = {
    * Enqueues a new job to be processed by the backend.
    * This is the primary method for starting any background task.
    */
-  async enqueueJob(jobDetails: EnqueueJobPayload): Promise<JobRecord> {
+  async enqueueJob<K extends JobKind>(jobDetails: EnqueueJobPayload<K>): Promise<JobRecord> {
     // 1. Create a deterministic temporary client ID (will be replaced after server response).
     // We keep same ID once server responds, so we wait to extract id from server response.
     // But we still want an immediate placeholder row BEFORE network latency; to do that,
@@ -26,7 +29,7 @@ export const jobService = {
           id: placeholderId,
           type: jobDetails.type,
           label: jobDetails.label,
-          scope: jobDetails.payload?.scope,
+          scope: (jobDetails.payload as any)?.scope,
           createdAt: Date.now(),
           updatedAt: Date.now(),
           status: 'pending' as any,

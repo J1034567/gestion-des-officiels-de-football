@@ -33,10 +33,11 @@ serve(async (req) => {
             Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
         );
 
-        const { type, label, payload, total } = await req.json();
+        const { type, label, payload, total, dedupe_key } = await req.json();
 
         // We now use the authenticated user's ID
-        const jobToInsert = { user_id: user.id, type, label, payload, total, status: 'pending' };
+        const jobToInsert: Record<string, any> = { user_id: user.id, type, label, payload, total, status: 'pending' };
+        if (dedupe_key) jobToInsert.dedupe_key = dedupe_key;
 
         const { data: job, error: insertError } = await supabaseAdmin
             .from('jobs')
@@ -56,7 +57,8 @@ serve(async (req) => {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
     } catch (e) {
-        return new Response(JSON.stringify({ error: e.message }), {
+        const message = e instanceof Error ? e.message : String(e);
+        return new Response(JSON.stringify({ error: message }), {
             status: 500,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });

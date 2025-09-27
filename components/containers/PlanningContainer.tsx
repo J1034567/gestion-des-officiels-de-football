@@ -38,7 +38,6 @@ import {
 } from "../../hooks/useAssignments";
 import { upsertOfficial as upsertOfficialService } from "../../services/officialService";
 import { upsertStadium } from "../../services/stadiumService";
-import { downloadBlob } from "../../services/pdfService";
 import { jobService } from "../../services/jobService";
 import { JobKinds } from "../../supabase/functions/_shared/jobKinds";
 
@@ -392,9 +391,8 @@ const PlanningContainer: React.FC<PlanningContainerProps> = ({
     }
     const dateStr = match?.matchDate || new Date().toISOString().slice(0, 10);
     const safeName = (official?.fullName || officialId).replace(/\s+/g, "_");
-    notify.info("Génération en arrière-plan de l'ordre de mission…");
     try {
-      const job = await jobService.enqueueJob({
+      await jobService.enqueueJob({
         type: JobKinds.MissionOrdersSinglePdf,
         label: `Ordre mission ${official.lastName || officialId}`,
         payload: {
@@ -404,48 +402,11 @@ const PlanningContainer: React.FC<PlanningContainerProps> = ({
         },
         total: 1,
       });
-      // Poll for completion (simple inline polling). If fails or times out, fallback to legacy direct generation.
-      const deadline = Date.now() + 25_000; // 25s timeout
-      let artifactUrl: string | null = null;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 1500));
-        const { data, error } = await supabase
-          .from("jobs")
-          .select("status, result, error_message")
-          .eq("id", job.id)
-          .single();
-        if (error) break;
-        if (data?.status === "completed" && data?.result?.artifactUrl) {
-          artifactUrl = data.result.artifactUrl;
-          break;
-        }
-        if (data?.status === "failed") {
-          console.warn(
-            "[PrintMissionOrder] job failed, fallback to direct generation",
-            data.error_message
-          );
-          break;
-        }
-      }
-      if (artifactUrl) {
-        const resp = await fetch(artifactUrl);
-        if (resp.ok) {
-          const blob = await resp.blob();
-          downloadBlob(blob, `Ordre_Mission_${safeName}_${dateStr}.pdf`);
-          notify.success("Ordre de mission téléchargé.");
-          return;
-        }
-      }
-      // Fallback path: direct generation (only if no artifact produced)
-      notify.info("Fallback génération directe…");
-      const { generateMissionOrderPDF } = await import(
-        "../../services/pdfService"
+      notify.success(
+        "Ordre de mission en file d'attente – téléchargez depuis le Job Center lorsqu'il est prêt."
       );
-      const blob = await generateMissionOrderPDF(matchId, officialId);
-      downloadBlob(blob, `Ordre_Mission_${safeName}_${dateStr}.pdf`);
-      notify.success("Ordre de mission généré (fallback).");
     } catch (e: any) {
-      notify.error(`Erreur génération ordre de mission: ${e?.message || e}`);
+      notify.error(`Erreur mise en file ordre de mission: ${e?.message || e}`);
     }
   };
 

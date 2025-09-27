@@ -2,6 +2,7 @@
 import { useMutation } from '@tanstack/react-query';
 import { supabase } from '../lib/supabaseClient';
 import { jobService } from '../services/jobService';
+import { JobKinds } from '../supabase/functions/_shared/jobKinds';
 
 export function useSendBulkMessage() {
     return useMutation({
@@ -24,23 +25,10 @@ export function useSendBulkMessage() {
 
             // Use the new job-based email system
             const job = await jobService.enqueueJob({
-                type: 'mission_orders.email_bulk_v3',
-                label: `Bulk Message (${recipients.length} recipients)`,
-                scope: 'messaging',
-                meta: {
-                    recipients,
-                    subject,
-                    message,
-                    total: recipients.length
-                },
+                type: JobKinds.MessagingBulkEmail,
+                label: `Envoi message (${recipients.length})`,
                 total: recipients.length,
-                priority: 'normal',
-                retry_policy: {
-                    max_attempts: 3,
-                    backoff_base_ms: 2000,
-                    backoff_multiplier: 2,
-                    retryable_errors: ['network_error', 'service_unavailable']
-                }
+                payload: { recipients, subject, message }
             });
 
             return {

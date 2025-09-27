@@ -29,24 +29,32 @@ const RESOURCE_LIMITS = {
 
 // Enhanced phase weights with more granular progress tracking
 const PHASE_WEIGHTS: Record<string, { name: string; weight: number }[]> = {
-    'mission_orders.bulk_pdf_v3': [
+    // Canonical bulk mission orders PDF job
+    'mission_orders.bulk_pdf': [
         { name: 'validation', weight: 5 },
         { name: 'fetch_data', weight: 15 },
         { name: 'generate_pdfs', weight: 50 },
         { name: 'merge_documents', weight: 20 },
         { name: 'upload_artifact', weight: 10 }
     ],
-    'mission_orders.email_bulk_v3': [
+    'mission_orders.individual_pdf': [
+        { name: 'fetch_data', weight: 30 },
+        { name: 'generate_pdf', weight: 50 },
+        { name: 'upload', weight: 20 }
+    ],
+    // Canonical single mission order PDF (frontend uses mission_orders.single_pdf)
+    'mission_orders.single_pdf': [
+        { name: 'validation', weight: 10 },
+        { name: 'generate', weight: 70 },
+        { name: 'upload_artifact', weight: 20 }
+    ],
+    // Canonical bulk match sheets email (replaces mission_orders.email_bulk*)
+    'match_sheets.bulk_email': [
         { name: 'validation', weight: 5 },
         { name: 'prepare_recipients', weight: 10 },
         { name: 'render_templates', weight: 25 },
         { name: 'send_emails', weight: 50 },
         { name: 'cleanup', weight: 10 }
-    ],
-    'mission_orders.individual_pdf': [
-        { name: 'fetch_data', weight: 30 },
-        { name: 'generate_pdf', weight: 50 },
-        { name: 'upload', weight: 20 }
     ],
     'exports.data': [
         { name: 'validate_params', weight: 10 },
@@ -54,17 +62,7 @@ const PHASE_WEIGHTS: Record<string, { name: string; weight: number }[]> = {
         { name: 'format_output', weight: 20 },
         { name: 'upload_file', weight: 10 }
     ],
-    // Legacy support
-    'mission_orders.bulk_pdf_v2': [
-        { name: 'fetch', weight: 40 },
-        { name: 'merge', weight: 40 },
-        { name: 'upload', weight: 20 }
-    ],
-    'mission_orders.email_bulk_v2': [
-        { name: 'prepare', weight: 15 },
-        { name: 'render', weight: 35 },
-        { name: 'send', weight: 50 }
-    ]
+    // (Removed legacy mission_orders.email_bulk_v2 / v3 weights after migration)
 };
 
 interface JobRow {
@@ -275,8 +273,183 @@ async function updateOverallProgress(
 // --- Enhanced Job Type Handlers ---
 
 const handlers: Record<string, (slog: Slog, supabase: SupabaseClient, job: JobRow) => Promise<void>> = {
+    // Canonical single mission order PDF generation (replaces mission_orders.individual_pdf) 
+    'mission_orders.single_pdf': async (slog, supabase, job) => {
+        const startTime = Date.now();
+        const phases = PHASE_WEIGHTS[job.type];
+        const matchId = job.payload?.matchId;
+        const officialId = job.payload?.officialId;
+        const fileName = job.payload?.fileName || `mission_order_${matchId}_${officialId}.pdf`;
+        if (!matchId || !officialId) {
+            throw Object.assign(new Error('Missing matchId or officialId'), { code: 'validation_failed' });
+        }
+        // Phase 1: validation
+        await withJobPhase(slog, supabase, job, phases[0].name, async () => {
+            await updateOverallProgress(supabase, job, phases[0].name, 100);
+        });
+        // Phase 2: generate
+        let pdfBytes: Uint8Array | null = null;
+        await withJobPhase(slog, supabase, job, phases[1].name, async () => {
+            const { data, error } = await supabase.functions.invoke('generate-mission-order', {
+                body: { matchId, officialId, returnBase64: true }
+            });
+            if (error) throw error;
+            if (!data?.pdfBase64) {
+                throw Object.assign(new Error('No pdfBase64'), { code: 'generation_failed' });
+            }
+            pdfBytes = Uint8Array.from(atob(data.pdfBase64), c => c.charCodeAt(0));
+            await supabase.from('jobs').update({ phase_progress: 100 }).eq('id', job.id);
+            await updateOverallProgress(supabase, job, phases[1].name, 100);
+        });
+        // Phase 3: upload_artifact
+        await withJobPhase(slog, supabase, job, phases[2].name, async () => {
+            if (!pdfBytes || pdfBytes.length === 0) {
+                throw Object.assign(new Error('Empty PDF bytes'), { code: 'artifact_empty' });
+            }
+            const path = `single/${job.dedupe_key || job.id}.pdf`;
+            const { error: uploadError } = await supabase.storage.from('mission_orders').upload(path, pdfBytes, { contentType: 'application/pdf', upsert: true });
+            if (uploadError) {
+                throw Object.assign(new Error(uploadError.message), { code: 'upload_failed' });
+            }
+            await supabase.from('jobs').update({
+                artifact_path: path,
+                artifact_type: 'pdf',
+                payload: { ...job.payload, artifact: { path, size: pdfBytes.length, fileName } }
+            }).eq('id', job.id);
+            await supabase.from('jobs').update({ phase_progress: 100 }).eq('id', job.id);
+            await updateOverallProgress(supabase, job, phases[2].name, 100);
+            trackJobPerformance(slog, job, startTime, 1);
+        });
+    },
+    // Canonical bulk match sheets email handler (replaces mission_orders.email_bulk*)
+    'match_sheets.bulk_email': async (slog, supabase, job) => {
+        // (Legacy comment removed) Reuse logic now consolidated under match_sheets.bulk_email.
+        const startTime = Date.now();
+        const phases = PHASE_WEIGHTS['match_sheets.bulk_email'];
+        const recipients = job.payload?.recipients || [];
+        if (!Array.isArray(recipients) || recipients.length === 0) {
+            throw Object.assign(new Error('Payload contains no recipients'), { code: 'no_recipients' });
+        }
+        // Phase 1: validation
+        await withJobPhase(slog, supabase, job, phases[0].name, async () => {
+            const { subject, content, html } = job.payload;
+            if (!(subject && (content || html))) {
+                throw Object.assign(new Error('Missing subject/content'), { code: 'missing_email_data' });
+            }
+            await updateOverallProgress(supabase, job, phases[0].name, 100);
+        });
+        // Phase 2: prepare recipients
+        await withJobPhase(slog, supabase, job, phases[1].name, async () => {
+            const { count } = await supabase.from('job_items').select('id', { count: 'exact', head: true }).eq('job_id', job.id);
+            if (count === 0) {
+                const rows = recipients.map((r: any, idx: number) => ({ job_id: job.id, seq: idx, target: r }));
+                const chunkSize = 500;
+                for (let i = 0; i < rows.length; i += chunkSize) {
+                    const { error } = await supabase.from('job_items').insert(rows.slice(i, i + chunkSize));
+                    if (error) throw error;
+                    const pct = Math.round(((i + chunkSize) / rows.length) * 100);
+                    await supabase.from('jobs').update({ phase_progress: Math.min(100, pct) }).eq('id', job.id);
+                    await updateOverallProgress(supabase, job, phases[1].name, Math.min(100, pct));
+                }
+            } else {
+                await updateOverallProgress(supabase, job, phases[1].name, 100);
+            }
+        });
+        // Phase 3: render templates (validate emails)
+        await withJobPhase(slog, supabase, job, phases[2].name, async () => {
+            const { data: items, error: itemsErr } = await supabase.from('job_items').select('id, target, status').eq('job_id', job.id);
+            if (itemsErr) throw itemsErr;
+            let processed = 0;
+            for (const item of items) {
+                if (item.status !== 'pending') { processed++; continue; }
+                if (!item.target?.email || !/^[^@]+@[^@]+\.[^@]+$/.test(item.target.email)) {
+                    await supabase.from('job_items').update({ status: 'skipped', error_code: 'invalid_email' }).eq('id', item.id);
+                }
+                processed++;
+                const pct = Math.round((processed / items.length) * 100);
+                await supabase.from('jobs').update({ phase_progress: pct }).eq('id', job.id);
+                await updateOverallProgress(supabase, job, phases[2].name, pct);
+            }
+        });
+        // Phase 4: send emails (reuse logic from v3; simplified)
+        await withJobPhase(slog, supabase, job, phases[3].name, async () => {
+            await resourcePool.acquire('email_sending');
+            try {
+                const { data: items, error: itemsErr } = await supabase.from('job_items').select('id, target, status').eq('job_id', job.id).eq('status', 'pending');
+                if (itemsErr) throw itemsErr;
+                const sendgridKey = Deno.env.get('SENDGRID_API_KEY');
+                const resendKey = Deno.env.get('RESEND_API_KEY');
+                const payloadSubject = job.payload?.subject;
+                const payloadHtml = job.payload?.html || job.payload?.content || '';
+                const payloadText = job.payload?.text || job.payload?.content || '';
+                const payloadAttachments = Array.isArray(job.payload?.attachments) ? job.payload.attachments : [];
+                const fromEmail = Deno.env.get('EMAIL_FROM') || Deno.env.get('SENDGRID_FROM') || Deno.env.get('RESEND_FROM') || 'no-reply@example.com';
+                const fromName = Deno.env.get('EMAIL_FROM_NAME') || 'Match Center';
+                const sendOne = async (to: { email: string; name?: string }) => {
+                    if (!to?.email) throw new Error('missing_target_email');
+                    if (sendgridKey) {
+                        const sgBody: any = { personalizations: [{ to: [{ email: to.email, name: to.name }].filter(t => !!t.email) }], from: { email: fromEmail, name: fromName }, subject: payloadSubject, content: [] };
+                        if (payloadText) sgBody.content.push({ type: 'text/plain', value: payloadText });
+                        if (payloadHtml) sgBody.content.push({ type: 'text/html', value: payloadHtml });
+                        if (payloadAttachments.length) {
+                            sgBody.attachments = payloadAttachments.map((a: any) => ({ content: a.content, filename: a.filename || 'attachment', type: a.type || 'application/octet-stream', disposition: a.disposition || 'attachment' }));
+                        }
+                        const resp = await fetch('https://api.sendgrid.com/v3/mail/send', { method: 'POST', headers: { 'Authorization': `Bearer ${sendgridKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(sgBody) });
+                        if (!resp.ok) { const body = await resp.text(); throw new Error(`sendgrid_error_${resp.status}: ${body.slice(0, 300)}`); }
+                        return { provider: 'sendgrid' };
+                    } else if (resendKey) {
+                        const rsBody: any = { from: `${fromName} <${fromEmail}>`, to: [to.email], subject: payloadSubject, html: payloadHtml || undefined, text: payloadText || undefined };
+                        if (payloadAttachments.length) { rsBody.attachments = payloadAttachments.map((a: any) => ({ filename: a.filename || 'attachment', content: a.content })); }
+                        const resp = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { 'Authorization': `Bearer ${resendKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(rsBody) });
+                        if (!resp.ok) { const body = await resp.text(); throw new Error(`resend_error_${resp.status}: ${body.slice(0, 300)}`); }
+                        return { provider: 'resend' };
+                    } else {
+                        await new Promise(r => setTimeout(r, 5));
+                        return { provider: 'mock' };
+                    }
+                };
+                let processed = 0, sent = 0, failed = 0;
+                for (const item of items) {
+                    try {
+                        if (processed > 0 && processed % 10 === 0) await new Promise(r => setTimeout(r, 800));
+                        const target = item.target || {};
+                        const result = await sendOne(target);
+                        await supabase.from('job_items').update({ status: 'completed', started_at: new Date().toISOString(), finished_at: new Date().toISOString(), provider: result.provider }).eq('id', item.id);
+                        sent++;
+                    } catch (e: any) {
+                        const errorInfo = classifyError(e);
+                        await supabase.from('job_items').update({ status: 'failed', error_code: errorInfo.category, error_message: e?.message || 'Send failed', finished_at: new Date().toISOString() }).eq('id', item.id);
+                        failed++;
+                        slog('warn', 'send.item.failed', { jobId: job.id, itemId: item.id, error: e?.message, category: errorInfo.category });
+                    }
+                    processed++;
+                    const pct = Math.round((processed / items.length) * 100);
+                    await supabase.from('jobs').update({ phase_progress: pct }).eq('id', job.id);
+                    await updateOverallProgress(supabase, job, phases[3].name, pct);
+                }
+                slog('info', 'send.summary', { jobId: job.id, total: processed, sent, failed });
+            } finally {
+                resourcePool.release('email_sending');
+            }
+        });
+        // Phase 5: cleanup
+        await withJobPhase(slog, supabase, job, phases[4].name, async () => {
+            const { data: finalStats } = await supabase.from('job_items').select('status').eq('job_id', job.id);
+            const stats = {
+                total: finalStats?.length || 0,
+                completed: finalStats?.filter(i => i.status === 'completed').length || 0,
+                failed: finalStats?.filter(i => i.status === 'failed').length || 0,
+                skipped: finalStats?.filter(i => i.status === 'skipped').length || 0
+            };
+            await supabase.from('jobs').update({ payload: { ...job.payload, email_stats: stats } }).eq('id', job.id);
+            await updateOverallProgress(supabase, job, phases[4].name, 100);
+            trackJobPerformance(slog, job, startTime, recipients.length);
+        });
+    },
+    // Legacy adapters -> delegate to canonical handler to avoid code duplication
+    // (Removed legacy email_bulk_v2/v3 adapter handlers after full migration)
     // Enhanced bulk PDF handler with better resource management
-    'mission_orders.bulk_pdf_v3': async (slog, supabase, job) => {
+    'mission_orders.bulk_pdf': async (slog, supabase, job) => {
         const startTime = Date.now();
         const phases = PHASE_WEIGHTS[job.type];
         const orders = job.payload?.orders || [];
@@ -438,8 +611,7 @@ const handlers: Record<string, (slog: Slog, supabase: SupabaseClient, job: JobRo
                 }).eq('id', job.id);
 
                 await updateOverallProgress(supabase, job, phases[4].name, 100);
-
-                // Track final performance metrics
+                // Track final performance metrics for full job
                 trackJobPerformance(slog, job, startTime, orders.length);
             } finally {
                 resourcePool.release('file_operations');
@@ -447,438 +619,7 @@ const handlers: Record<string, (slog: Slog, supabase: SupabaseClient, job: JobRo
         });
     },
 
-    // Enhanced bulk email handler with better error handling and resource management
-    'mission_orders.email_bulk_v3': async (slog, supabase, job) => {
-        const startTime = Date.now();
-        const phases = PHASE_WEIGHTS[job.type];
-        const recipients = job.payload?.recipients || [];
-
-        if (!Array.isArray(recipients) || recipients.length === 0) {
-            throw Object.assign(new Error('Payload contains no recipients'), { code: 'no_recipients' });
-        }
-
-        slog('info', 'handler.start', { jobId: job.id, jobType: job.type, recipientCount: recipients.length });
-
-        // Phase 1: Validation
-        await withJobPhase(slog, supabase, job, phases[0].name, async () => {
-            const { subject, content, html } = job.payload;
-            const emailContent = content || html;
-            if (!subject || !emailContent) {
-                throw Object.assign(new Error('Missing subject or content'), { code: 'missing_email_data' });
-            }
-            await updateOverallProgress(supabase, job, phases[0].name, 100);
-        });
-
-        // Phase 2: Prepare recipients (create job_items if not exists)
-        await withJobPhase(slog, supabase, job, phases[1].name, async () => {
-            const { count } = await supabase.from('job_items')
-                .select('id', { count: 'exact', head: true })
-                .eq('job_id', job.id);
-
-            if (count === 0) {
-                slog('info', 'prepare.items.creating', { jobId: job.id, count: recipients.length });
-                const rows = recipients.map((r: any, idx: number) => ({
-                    job_id: job.id,
-                    seq: idx,
-                    target: r
-                }));
-
-                const chunkSize = 500;
-                for (let i = 0; i < rows.length; i += chunkSize) {
-                    const { error } = await supabase.from('job_items')
-                        .insert(rows.slice(i, i + chunkSize));
-                    if (error) throw error;
-
-                    const pct = Math.round(((i + chunkSize) / rows.length) * 100);
-                    await supabase.from('jobs').update({ phase_progress: Math.min(100, pct) }).eq('id', job.id);
-                    await updateOverallProgress(supabase, job, phases[1].name, Math.min(100, pct));
-                }
-            } else {
-                slog('info', 'prepare.items.existing', { jobId: job.id, count });
-                await updateOverallProgress(supabase, job, phases[1].name, 100);
-            }
-        });
-
-        // Phase 3: Render templates (validate recipients)
-        await withJobPhase(slog, supabase, job, phases[2].name, async () => {
-            const { data: items, error: itemsErr } = await supabase.from('job_items')
-                .select('id, target, status')
-                .eq('job_id', job.id);
-
-            if (itemsErr) throw itemsErr;
-
-            let processed = 0;
-            for (const item of items) {
-                if (item.status !== 'pending') {
-                    processed++;
-                    continue;
-                }
-
-                if (!item.target?.email || !/^[^@]+@[^@]+\.[^@]+$/.test(item.target.email)) {
-                    await supabase.from('job_items').update({
-                        status: 'skipped',
-                        error_code: 'invalid_email'
-                    }).eq('id', item.id);
-                }
-
-                processed++;
-                const pct = Math.round((processed / items.length) * 100);
-                await supabase.from('jobs').update({ phase_progress: pct }).eq('id', job.id);
-                await updateOverallProgress(supabase, job, phases[2].name, pct);
-            }
-        });
-
-        // Phase 4: Send emails with rate limiting
-        await withJobPhase(slog, supabase, job, phases[3].name, async () => {
-            await resourcePool.acquire('email_sending');
-
-            try {
-                const { data: items, error: itemsErr } = await supabase.from('job_items')
-                    .select('id, target, status')
-                    .eq('job_id', job.id)
-                    .eq('status', 'pending');
-
-                if (itemsErr) throw itemsErr;
-
-                if (!items.length) {
-                    slog('info', 'send.no_pending_items', { jobId: job.id });
-                    return;
-                }
-
-                const sendgridKey = Deno.env.get('SENDGRID_API_KEY');
-                const resendKey = Deno.env.get('RESEND_API_KEY');
-                slog('info', 'send.start', {
-                    jobId: job.id,
-                    itemCount: items.length,
-                    provider: sendgridKey ? 'sendgrid' : resendKey ? 'resend' : 'mock'
-                });
-
-                // Extract common email payload fields
-                const payloadSubject = job.payload?.subject;
-                const payloadHtml = job.payload?.html || job.payload?.content || '';
-                const payloadText = job.payload?.text || job.payload?.content || '';
-                const payloadAttachments = Array.isArray(job.payload?.attachments) ? job.payload.attachments : [];
-                const fromEmail = Deno.env.get('EMAIL_FROM') || Deno.env.get('SENDGRID_FROM') || Deno.env.get('RESEND_FROM') || 'no-reply@example.com';
-                const fromName = Deno.env.get('EMAIL_FROM_NAME') || 'Match Center';
-
-                // Helper to actually send one email depending on provider
-                const sendOne = async (to: { email: string; name?: string }) => {
-                    if (!to?.email) throw new Error('missing_target_email');
-
-                    if (sendgridKey) {
-                        // SENDGRID implementation
-                        const sgBody: any = {
-                            personalizations: [
-                                { to: [{ email: to.email, name: to.name }].filter(t => !!t.email) }
-                            ],
-                            from: { email: fromEmail, name: fromName },
-                            subject: payloadSubject,
-                            content: [] as any[]
-                        };
-                        if (payloadText) sgBody.content.push({ type: 'text/plain', value: payloadText });
-                        if (payloadHtml) sgBody.content.push({ type: 'text/html', value: payloadHtml });
-                        if (payloadAttachments.length) {
-                            sgBody.attachments = payloadAttachments.map((a: any) => ({
-                                content: a.content, // must be base64
-                                filename: a.filename || 'attachment',
-                                type: a.type || 'application/octet-stream',
-                                disposition: a.disposition || 'attachment'
-                            }));
-                        }
-
-                        const resp = await fetch('https://api.sendgrid.com/v3/mail/send', {
-                            method: 'POST',
-                            headers: {
-                                'Authorization': `Bearer ${sendgridKey}`,
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify(sgBody)
-                        });
-                        if (!resp.ok) {
-                            const body = await resp.text();
-                            throw new Error(`sendgrid_error_${resp.status}: ${body.slice(0, 500)}`);
-                        }
-                        return { provider: 'sendgrid' };
-                    } else if (resendKey) {
-                        // RESEND implementation
-                        const rsBody: any = {
-                            from: `${fromName} <${fromEmail}>`,
-                            to: [to.email],
-                            subject: payloadSubject,
-                            html: payloadHtml || undefined,
-                            text: payloadText || undefined
-                        };
-                        if (payloadAttachments.length) {
-                            rsBody.attachments = payloadAttachments.map((a: any) => ({
-                                filename: a.filename || 'attachment',
-                                content: a.content // base64
-                            }));
-                        }
-                        const resp = await fetch('https://api.resend.com/emails', {
-                            method: 'POST',
-                            headers: {
-                                'Authorization': `Bearer ${resendKey}`,
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify(rsBody)
-                        });
-                        if (!resp.ok) {
-                            const body = await resp.text();
-                            throw new Error(`resend_error_${resp.status}: ${body.slice(0, 500)}`);
-                        }
-                        return { provider: 'resend' };
-                    } else {
-                        // MOCK mode - simulate a small delay
-                        await new Promise(r => setTimeout(r, 5));
-                        return { provider: 'mock' };
-                    }
-                };
-
-                let processed = 0;
-                let sent = 0;
-                let failed = 0;
-
-                for (const item of items) {
-                    try {
-                        // Add small delay to avoid overwhelming the email service
-                        if (processed > 0 && processed % 10 === 0) {
-                            await new Promise(resolve => setTimeout(resolve, 1000));
-                        }
-
-                        const target = item.target || {};
-                        const result = await sendOne(target);
-
-                        await supabase.from('job_items').update({
-                            status: 'completed',
-                            started_at: new Date().toISOString(),
-                            finished_at: new Date().toISOString(),
-                            provider: result.provider
-                        }).eq('id', item.id);
-
-                        sent++;
-                    } catch (e: any) {
-                        const errorInfo = classifyError(e);
-                        await supabase.from('job_items').update({
-                            status: 'failed',
-                            error_code: errorInfo.category,
-                            error_message: e?.message || 'Send failed',
-                            finished_at: new Date().toISOString()
-                        }).eq('id', item.id);
-
-                        failed++;
-                        slog('warn', 'send.item.failed', {
-                            jobId: job.id,
-                            itemId: item.id,
-                            error: e?.message,
-                            category: errorInfo.category
-                        });
-                    }
-
-                    processed++;
-                    const pct = Math.round((processed / items.length) * 100);
-                    await supabase.from('jobs').update({ phase_progress: pct }).eq('id', job.id);
-                    await updateOverallProgress(supabase, job, phases[3].name, pct);
-                }
-
-                slog('info', 'send.summary', {
-                    jobId: job.id,
-                    total: processed,
-                    sent,
-                    failed
-                });
-            } finally {
-                resourcePool.release('email_sending');
-            }
-        });
-
-        // Phase 5: Cleanup
-        await withJobPhase(slog, supabase, job, phases[4].name, async () => {
-            // Update job payload with final statistics
-            const { data: finalStats } = await supabase.from('job_items')
-                .select('status')
-                .eq('job_id', job.id);
-
-            const stats = {
-                total: finalStats?.length || 0,
-                completed: finalStats?.filter(item => item.status === 'completed').length || 0,
-                failed: finalStats?.filter(item => item.status === 'failed').length || 0,
-                skipped: finalStats?.filter(item => item.status === 'skipped').length || 0
-            };
-
-            await supabase.from('jobs').update({
-                payload: { ...job.payload, email_stats: stats }
-            }).eq('id', job.id);
-
-            await updateOverallProgress(supabase, job, phases[4].name, 100);
-
-            // Track final performance metrics
-            trackJobPerformance(slog, job, startTime, recipients.length);
-        });
-    },
-
-    // Legacy handlers for backward compatibility
-    'mission_orders.bulk_pdf_v2': async (slog, supabase, job) => {
-        // Keep the existing implementation for backward compatibility
-        const phases = PHASE_WEIGHTS[job.type];
-        const orders = job.payload?.orders || [];
-        if (!Array.isArray(orders) || orders.length === 0) {
-            throw Object.assign(new Error('Payload contains no orders'), { code: 'empty_payload' });
-        }
-        slog('info', 'handler.start', { jobId: job.id, jobType: job.type, orderCount: orders.length });
-
-        // Phase 1: fetch individual PDFs
-        await withJobPhase(slog, supabase, job, phases[0].name, async () => {
-            let completed = 0, blobs: Uint8Array[] = [], failures: any[] = [];
-            for (const o of orders) {
-                try {
-                    const { data, error } = await supabase.functions.invoke('generate-mission-order', { body: { matchId: o.matchId, officialId: o.officialId, returnBase64: true } });
-                    if (error) throw error;
-                    if (data?.pdfBase64) {
-                        blobs.push(Uint8Array.from(atob(data.pdfBase64), c => c.charCodeAt(0)));
-                    } else {
-                        failures.push({ ...o, reason: 'missing_pdfBase64' });
-                    }
-                } catch (e) {
-                    slog('warn', 'fetch.item.failed', { jobId: job.id, order: o, error: e?.message });
-                    failures.push({ ...o, reason: e?.message || 'invoke_failed' });
-                }
-                completed++;
-                const pct = Math.round((completed / orders.length) * 100);
-                await supabase.from('jobs').update({ phase_progress: pct }).eq('id', job.id);
-                await updateOverallProgress(supabase, job, phases[0].name, pct);
-            }
-            (job as any)._fetchedBytes = blobs;
-            (job as any)._fetchStats = { total: orders.length, succeeded: blobs.length, failed: failures.length, failures: failures.slice(0, 25) };
-            slog('info', 'fetch.summary', { jobId: job.id, ...((job as any)._fetchStats) });
-        });
-
-        // Phase 2: merge
-        await withJobPhase(slog, supabase, job, phases[1].name, async () => {
-            const fetched: Uint8Array[] = (job as any)._fetchedBytes || [];
-            if (!fetched.length) {
-                const stats = (job as any)._fetchStats || {};
-                await supabase.from('jobs').update({ payload: { ...job.payload, fetch_stats: stats }, error_code: 'no_pages' }).eq('id', job.id);
-                throw Object.assign(new Error('No PDF pages to merge'), { code: 'no_pages' });
-            }
-            const merged = await PDFDocument.create();
-            let idx = 0;
-            for (const bytes of fetched) {
-                try {
-                    const pdf = await PDFDocument.load(bytes);
-                    const pages = await merged.copyPages(pdf, pdf.getPageIndices());
-                    pages.forEach((p: any) => merged.addPage(p));
-                } catch (e) {
-                    slog('warn', 'merge.page.failed', { jobId: job.id, error: e?.message });
-                }
-                idx++;
-                const pct = Math.round((idx / fetched.length) * 100);
-                await supabase.from('jobs').update({ phase_progress: pct }).eq('id', job.id);
-                await updateOverallProgress(supabase, job, phases[1].name, pct);
-            }
-            (job as any)._mergedBytes = await merged.save();
-        });
-
-        // Phase 3: upload
-        await withJobPhase(slog, supabase, job, phases[2].name, async () => {
-            const mergedBytes: Uint8Array = (job as any)._mergedBytes;
-            const size = mergedBytes?.length || 0;
-            const fetchStats = (job as any)._fetchStats || null;
-            if (size === 0) {
-                slog('error', 'artifact.empty', { jobId: job.id });
-                await supabase.from('jobs').update({ payload: { ...job.payload, fetch_stats: fetchStats }, error_code: 'artifact_empty' }).eq('id', job.id);
-                throw Object.assign(new Error('Merged artifact is empty'), { code: 'artifact_empty' });
-            }
-            const path = `batches/${job.dedupe_key || job.id}.pdf`;
-            const { error } = await supabase.storage.from('mission_orders').upload(path, mergedBytes, { contentType: 'application/pdf', upsert: true });
-            if (error) {
-                throw Object.assign(new Error(`Storage upload failed: ${error.message}`), { code: 'upload_failed' });
-            }
-            slog('info', 'upload.success', { jobId: job.id, path, size });
-            await supabase.from('jobs').update({
-                artifact_path: path,
-                artifact_type: 'pdf',
-                payload: { ...job.payload, fetch_stats: fetchStats, artifact: { size, path } }
-            }).eq('id', job.id);
-            slog('info', 'artifact.metadata.saved', { jobId: job.id, size });
-            await updateOverallProgress(supabase, job, phases[2].name, 100);
-        });
-    },
-
-    // Legacy email handler for backward compatibility  
-    'mission_orders.email_bulk_v2': async (slog, supabase, job) => {
-        const phases = PHASE_WEIGHTS[job.type];
-        const recipients = job.payload?.recipients || [];
-        if (!Array.isArray(recipients) || recipients.length === 0) {
-            throw Object.assign(new Error('Payload contains no recipients'), { code: 'no_recipients' });
-        }
-        slog('info', 'handler.start', { jobId: job.id, jobType: job.type, recipientCount: recipients.length });
-
-        // Phase 1: prepare (create job_items)
-        await withJobPhase(slog, supabase, job, phases[0].name, async () => {
-            const { count } = await supabase.from('job_items').select('id', { count: 'exact', head: true }).eq('job_id', job.id);
-            if (count === 0) {
-                slog('info', 'prepare.items.creating', { jobId: job.id, count: recipients.length });
-                const rows = recipients.map((r: any, idx: number) => ({ job_id: job.id, seq: idx, target: r }));
-                const chunkSize = 500;
-                for (let i = 0; i < rows.length; i += chunkSize) {
-                    const { error } = await supabase.from('job_items').insert(rows.slice(i, i + chunkSize));
-                    if (error) throw error;
-                }
-            } else {
-                slog('info', 'prepare.items.existing', { jobId: job.id, count });
-            }
-            await updateOverallProgress(supabase, job, phases[0].name, 100);
-        });
-
-        // Phase 2: render (validate items)
-        await withJobPhase(slog, supabase, job, phases[1].name, async () => {
-            const { data: items, error: itemsErr } = await supabase.from('job_items').select('id, target, status').eq('job_id', job.id);
-            if (itemsErr) throw itemsErr;
-            let processed = 0;
-            for (const item of items) {
-                if (item.status !== 'pending') { // Only process pending, not failed/skipped on retry
-                    processed++; continue;
-                }
-                if (!item.target?.email || !/^[^@]+@[^@]+\.[^@]+$/.test(item.target.email)) {
-                    await supabase.from('job_items').update({ status: 'skipped', error_code: 'invalid_email' }).eq('id', item.id);
-                }
-                processed++;
-                const pct = Math.round((processed / items.length) * 100);
-                await supabase.from('jobs').update({ phase_progress: pct }).eq('id', job.id);
-                await updateOverallProgress(supabase, job, phases[1].name, pct);
-            }
-        });
-
-        // Phase 3: send
-        await withJobPhase(slog, supabase, job, phases[2].name, async () => {
-            const { data: items, error: itemsErr } = await supabase.from('job_items').select('id, target, status').eq('job_id', job.id).eq('status', 'pending');
-            if (itemsErr) throw itemsErr;
-            if (!items.length) {
-                slog('info', 'send.no_pending_items', { jobId: job.id });
-                return;
-            }
-            const sendgridKey = Deno.env.get('SENDGRID_API_KEY');
-            slog('info', 'send.start', { jobId: job.id, itemCount: items.length, useSendGrid: !!sendgridKey });
-            let processed = 0;
-            for (const item of items) {
-                try {
-                    if (sendgridKey) {
-                        // Real implementation would be here
-                    } else {
-                        await new Promise(r => setTimeout(r, 2)); // Simulate work
-                    }
-                    await supabase.from('job_items').update({ status: 'completed', started_at: new Date().toISOString(), finished_at: new Date().toISOString() }).eq('id', item.id);
-                } catch (e: any) {
-                    const code = e?.code || 'send_failed';
-                    await supabase.from('job_items').update({ status: 'failed', error_code: code, error_message: e?.detail || e?.message, finished_at: new Date().toISOString() }).eq('id', item.id);
-                }
-                processed++;
-                const pct = Math.round((processed / items.length) * 100);
-                await supabase.from('jobs').update({ phase_progress: pct }).eq('id', job.id);
-                await updateOverallProgress(supabase, job, phases[2].name, pct);
-            }
-        });
-    }
+    // (Removed legacy mission_orders.email_bulk_v2 handler)
 };
 
 // --- Enhanced Main Server & Claiming Logic ---

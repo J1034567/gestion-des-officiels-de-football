@@ -7,6 +7,7 @@ import React, { useState } from "react";
 import { useNotificationContext } from "../contexts/NotificationContext";
 import { quickJobSystemTest } from "../tests/quick-job-test";
 import { jobService } from "../services/jobService";
+import { JobKinds } from "../supabase/functions/_shared/jobKinds";
 
 interface TestResult {
   testName: string;
@@ -81,18 +82,16 @@ export const JobSystemTestPanel: React.FC = () => {
 
   const testBulkPDF = async () => {
     const job = await jobService.enqueueJob({
-      type: "mission_orders.bulk_pdf_v3",
+      type: JobKinds.MissionOrdersBulkPdf,
       label: "Test Bulk PDF Generation",
-      scope: "test",
-      meta: {
+      payload: {
         orders: [
           { matchId: "test-match-1", officialId: "test-official-1" },
           { matchId: "test-match-2", officialId: "test-official-2" },
         ],
-        total: 2,
+        fileName: "test-bulk.pdf",
       },
       total: 2,
-      priority: "high",
     });
 
     return { jobId: job.id, status: job.status, type: job.type };
@@ -100,20 +99,18 @@ export const JobSystemTestPanel: React.FC = () => {
 
   const testBulkEmail = async () => {
     const job = await jobService.enqueueJob({
-      type: "mission_orders.email_bulk_v3",
+      type: JobKinds.MatchSheetsBulkEmail,
       label: "Test Bulk Email Sending",
-      scope: "test",
-      meta: {
+      payload: {
         recipients: [
           { email: "test1@example.com", name: "Test User 1" },
           { email: "test2@example.com", name: "Test User 2" },
         ],
         subject: "Integration Test Email",
         message: "This is a test email from the job system integration test.",
-        total: 2,
+        test: true,
       },
       total: 2,
-      priority: "normal",
     });
 
     return { jobId: job.id, status: job.status, type: job.type };
