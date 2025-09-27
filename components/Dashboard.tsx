@@ -293,55 +293,85 @@ const MainContent: React.FC<MainContentProps> = ({
   // Sticky header total height offset (nav tabs + internal toolbar)
   const SCROLL_HEADER_OFFSET = 160; // was 140, adjusted for better alignment
 
+  // The list view uses an internal scroll container (overflow-auto). We keep a ref to it.
+  const listScrollRef = useRef<HTMLDivElement | null>(null);
+
   // Helper to scroll to today's row (reused by effect + manual button)
-  const scrollToToday = useCallback((opts?: { highlight?: boolean }) => {
-    try {
-      const now = new Date();
-      // Build local date string to avoid UTC shifting (was causing previous-day scroll)
-      const y = now.getFullYear();
-      const m = String(now.getMonth() + 1).padStart(2, "0");
-      const d = String(now.getDate()).padStart(2, "0");
-      const localKey = `${y}-${m}-${d}`;
-      const target = document.querySelector(`tr[data-day-row='${localKey}']`);
-      if (target) {
-        const top =
-          (target as HTMLElement).getBoundingClientRect().top +
-          window.scrollY -
-          SCROLL_HEADER_OFFSET;
-        window.scrollTo({ top, behavior: "smooth" });
-        if (opts?.highlight) {
-          const el = target as HTMLElement;
-          el.classList.add(
-            "ring-2",
-            "ring-brand-primary",
-            "ring-offset-2",
-            "ring-offset-gray-800"
+  const scrollToToday = useCallback(
+    (opts?: { highlight?: boolean }) => {
+      try {
+        const scroller = listScrollRef.current;
+        if (!scroller) return; // Not in list view yet
+        const now = new Date();
+        const y = now.getFullYear();
+        const m = String(now.getMonth() + 1).padStart(2, "0");
+        const d = String(now.getDate()).padStart(2, "0");
+        const localKey = `${y}-${m}-${d}`;
+
+        // Query only within the scroll container
+        let target: HTMLElement | null = scroller.querySelector(
+          `tr[data-day-row='${localKey}']`
+        );
+
+        if (!target) {
+          const validDayKeys = sortedDays.filter((k) => k !== "Unscheduled");
+            const todayDate = new Date(`${localKey}T00:00:00`);
+          let futureCandidate: string | undefined = validDayKeys.find(
+            (k) => new Date(`${k}T00:00:00`) >= todayDate
           );
-          setTimeout(() => {
-            el.classList.remove(
+          if (!futureCandidate && validDayKeys.length > 0) {
+            futureCandidate = validDayKeys[validDayKeys.length - 1];
+          }
+          if (futureCandidate) {
+            target = scroller.querySelector(
+              `tr[data-day-row='${futureCandidate}']`
+            ) as HTMLElement | null;
+          }
+        }
+
+        if (target) {
+          // Position inside scroller
+          const targetTopRelative =
+            target.getBoundingClientRect().top -
+            scroller.getBoundingClientRect().top;
+          // Adjust for sticky headers inside the scroll container
+          const scrollTop = targetTopRelative - 10; // small padding
+          scroller.scrollTo({ top: scrollTop, behavior: "smooth" });
+
+          if (opts?.highlight) {
+            target.classList.add(
               "ring-2",
               "ring-brand-primary",
               "ring-offset-2",
               "ring-offset-gray-800"
             );
-          }, 1600);
+            setTimeout(() => {
+              target?.classList.remove(
+                "ring-2",
+                "ring-brand-primary",
+                "ring-offset-2",
+                "ring-offset-gray-800"
+              );
+            }, 1600);
+          }
         }
-      }
-    } catch (_) {}
-  }, []);
+      } catch (_) {}
+    },
+    [sortedDays]
+  );
 
   // Restore previous scroll position (if any) otherwise auto-scroll to today
   useEffect(() => {
     if (contentView !== "list") return;
     if (!displayMatches || displayMatches.length === 0) return;
-    // If we have a stored position, restore it once
+    const scroller = listScrollRef.current;
+    if (!scroller) return;
     if (initialListScroll != null) {
       const handle = requestAnimationFrame(() => {
-        window.scrollTo({ top: initialListScroll });
+        scroller.scrollTo({ top: initialListScroll });
       });
       return () => cancelAnimationFrame(handle);
     }
-    // Fallback to legacy behavior: scroll to today
     const handle = requestAnimationFrame(() => scrollToToday());
     return () => cancelAnimationFrame(handle);
   }, [contentView, displayMatches, scrollToToday, initialListScroll]);
@@ -350,11 +380,13 @@ const MainContent: React.FC<MainContentProps> = ({
   const latestScrollRef = useRef<number>(0);
   useEffect(() => {
     if (contentView !== "list") return;
+    const scroller = listScrollRef.current;
+    if (!scroller) return;
     const onScroll = () => {
-      latestScrollRef.current = window.scrollY;
+      latestScrollRef.current = scroller.scrollTop;
     };
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    return () => scroller.removeEventListener("scroll", onScroll);
   }, [contentView]);
 
   // Persist scroll position when MainContent unmounts (or dependencies change triggering unmount)
@@ -748,7 +780,10 @@ const MainContent: React.FC<MainContentProps> = ({
       {contentView === "list" &&
         (displayMatches.length > 0 ? (
           <div className="bg-gray-800 rounded-lg shadow-md overflow-hidden">
-            <div className="overflow-auto h-[calc(100vh-240px)]">
+            <div
+              className="overflow-auto h-[calc(100vh-240px)]"
+              ref={listScrollRef}
+            >
               <table className="min-w-full">
                 <thead className="bg-gray-700">
                   <tr>
