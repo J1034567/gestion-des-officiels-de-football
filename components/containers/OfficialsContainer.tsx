@@ -7,6 +7,8 @@ import { supabase } from "../../lib/supabaseClient";
 import { useOfficials } from "../../hooks/useOfficials";
 import { useMatches } from "../../hooks/useMatches";
 import { useAppSettings } from "../../hooks/useAppSettings";
+import { jobService } from "../../services/jobService";
+import { JobKinds } from "../../supabase/functions/_shared/jobKinds";
 import OfficialsView from "../OfficialsView";
 import { Official, Location } from "../../types";
 import {
@@ -154,27 +156,22 @@ const OfficialsContainer: React.FC = () => {
     subject: string,
     message: string
   ) => {
-    const recipients = officials
-      .filter((o) => officialIds.includes(o.id) && o.email)
-      .map((o) => o.email!)
-      .filter((e) => e.trim().length > 0);
-    if (recipients.length === 0) {
-      notify.error("Aucun destinataire avec email valide.");
+    if (!officialIds || officialIds.length === 0) {
+      notify.error("Aucun destinataire sélectionné.");
       return;
     }
-    notify.info(`Préparation de l'envoi: ${recipients.length} destinataires.`);
-    const { error } = await supabase.functions.invoke("send-email", {
-      body: {
-        to: recipients,
-        subject,
-        text: message,
-        html: `<p>${message.replace(/\n/g, "<br>")}</p>`,
-      },
-    });
-    if (error) {
-      notify.error(`Erreur d'envoi: ${error.message}`);
-    } else
-      notify.success(`Message envoyé à ${recipients.length} destinataires.`);
+    try {
+      notify.info("Enfilement du job d'envoi…");
+      await jobService.enqueueJob({
+        type: JobKinds.MessagingBulkEmail,
+        label: `Message groupé (${officialIds.length})`,
+        payload: { officialIds, subject, message },
+        total: officialIds.length,
+      });
+      notify.success("Job d'envoi créé. Suivi dans le centre des jobs.");
+    } catch (e: any) {
+      notify.error(`Erreur: ${e?.message || e}`);
+    }
   };
 
   const logAction = async (

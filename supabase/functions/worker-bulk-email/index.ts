@@ -6,6 +6,7 @@ import { createSupabaseAdminClient, createJsonResponse } from '../_shared/supaba
 import { generateMatchSheetHtml } from '../_shared/email-templates.ts';
 // We need the PDF generation logic from the other worker
 import { generateSingleMissionOrderPdf } from '../_shared/pdf-generation.ts';
+import { JobKinds } from '../_shared/jobKinds.ts';
 import { PDFDocument } from 'pdf-lib';
 
 function toBase64(arr: Uint8Array): string {
@@ -34,6 +35,105 @@ serve(async (req: Request) => {
     try {
         await supabase.from('jobs').update({ status: 'processing' }).eq('id', job.id);
 
+        // Branch on job type early
+        if (job.type === JobKinds.MessagingBulkEmail) {
+            // Simple broadcast: officialIds, subject, message
+            const { officialIds, subject, message } = job.payload;
+            if (!officialIds || !Array.isArray(officialIds) || officialIds.length === 0) {
+                await failJob('No officialIds provided for messaging.bulk_email');
+                return createJsonResponse({ error: 'No officialIds' }, 400);
+            }
+            const { data: officials, error: officialsError } = await supabase.from('officials').select('*').in('id', officialIds);
+            if (officialsError) throw officialsError;
+            const recipients = officials.filter((o: any) => !!o.email).map((o: any) => o.email);
+            if (recipients.length === 0) {
+                await supabase.from('jobs').update({ status: 'completed', progress: 0, result: { sent: 0 } }).eq('id', job.id);
+                return createJsonResponse({ success: true, sent: 0, message: 'No valid recipient emails.' });
+            }
+            const { error: invokeError } = await supabase.functions.invoke('send-email', {
+                body: {
+                    to: recipients,
+                    subject: subject || 'Message',
+                    html: `<p>${(message || '').replace(/\n/g, '<br>')}</p>`,
+                    text: message || '',
+                },
+                headers: { Authorization: `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}` }
+            });
+            if (invokeError) throw invokeError;
+            await supabase.from('jobs').update({ status: 'completed', progress: recipients.length, result: { sent: recipients.length } }).eq('id', job.id);
+            return createJsonResponse({ success: true, sent: recipients.length });
+        }
+
+        if (job.type === JobKinds.MissionOrdersSingleEmail) {
+            const { matchId, officialId } = job.payload;
+            if (!matchId || !officialId) {
+                await failJob('Missing matchId or officialId for single email job');
+                return createJsonResponse({ error: 'Invalid payload' }, 400);
+            }
+            // Fetch match + assignments + related single official
+            const { data: match, error: matchErr } = await supabase.from('matches').select(`*,
+                homeTeam:teams!home_team_id(code, name, name_ar),
+                awayTeam:teams!away_team_id(code, name, name_ar),
+                stadium:stadiums(*),
+                leagueGroup:league_groups!league_group_id(name_ar, league:leagues!league_id(name_ar)),
+                assignments:match_assignments(*)
+            `).eq('id', matchId).single();
+            if (matchErr) throw matchErr;
+            const { data: official, error: offErr } = await supabase.from('officials').select('*').eq('id', officialId).single();
+            if (offErr) throw offErr;
+            if (!official.email) {
+                await failJob('Official has no email');
+                return createJsonResponse({ error: 'No email' }, 400);
+            }
+            // Generate mission order PDF for this official
+            let base64Pdf: string | null = null;
+            try {
+                const pdfBytes = await generateSingleMissionOrderPdf(supabase, matchId, officialId);
+                base64Pdf = toBase64(pdfBytes);
+            } catch (e) {
+                console.error('[worker-bulk-email] Failed mission order PDF for single email', e);
+            }
+            // Minimal officials array for template context
+            const { data: officialsList, error: officialsErr } = await supabase.from('officials').select('*').in('id', (match.assignments as any[]).map((a: any) => a.official_id).filter((x: any) => !!x));
+            if (officialsErr) throw officialsErr;
+            const adaptedOfficialsSingle = officialsList.map((o: any) => ({
+                id: o.id,
+                firstName: o.first_name,
+                lastName: o.last_name,
+                firstNameAr: o.first_name_ar || o.first_name,
+                lastNameAr: o.last_name_ar || o.last_name,
+                fullName: o.full_name || `${o.first_name} ${o.last_name}`,
+                category: o.category,
+                phone: o.phone,
+                email: o.email,
+                locationId: o.location_id ?? null,
+            }));
+            // Locations for template
+            let locations: any[] = [];
+            const locId = match?.stadium?.location_id || match?.stadium?.locationId;
+            if (locId) {
+                const { data: locs } = await supabase.from('locations').select('*').in('id', [locId]);
+                locations = locs || [];
+            }
+            const transformedMatchSingle: any = {
+                ...match,
+                matchDate: (match as any).match_date ?? (match as any).matchDate ?? null,
+                matchTime: (match as any).match_time ?? (match as any).matchTime ?? null,
+                assignments: (match.assignments as any[]).map((a: any) => ({ ...a, officialId: a.official_id ?? a.officialId ?? null })),
+                stadium: match.stadium ? { ...match.stadium, locationId: match.stadium.locationId ?? match.stadium.location_id ?? null, nameAr: (match.stadium as any).nameAr || (match.stadium as any).name_ar || match.stadium.name } : null,
+            };
+            const { subject, html } = generateMatchSheetHtml(transformedMatchSingle, adaptedOfficialsSingle, !!match.is_sheet_sent, locations);
+            const attachments = base64Pdf ? [{ content: base64Pdf, filename: `ordre_de_mission_${official.last_name}_${match.homeTeam.code}_${match.awayTeam.code}.pdf`, type: 'application/pdf', disposition: 'attachment' }] : [];
+            const { error: invokeError } = await supabase.functions.invoke('send-email', {
+                body: { to: [official.email], subject, html, attachments },
+                headers: { Authorization: `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}` }
+            });
+            if (invokeError) throw invokeError;
+            await supabase.from('jobs').update({ status: 'completed', progress: 1, result: { sent: 1 } }).eq('id', job.id);
+            return createJsonResponse({ success: true, sent: 1 });
+        }
+
+        // Default path: bulk match sheets email (canonical or legacy)
         const matchIds: string[] = job.payload.matchIds;
         if (!matchIds || matchIds.length === 0) {
             await failJob('No match IDs provided in payload.');

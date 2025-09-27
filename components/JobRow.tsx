@@ -1,13 +1,13 @@
 // src/components/JobRow.tsx
-import React, { useMemo } from "react";
-import { JobRecord } from "../hooks/useJobCenter";
+import React, { useMemo, useState } from "react";
+import type { JobRecord } from "../hooks/useJobCenter";
 import { STATUS_CONFIG, formatDuration } from "./job-center.config";
 import { Download, RefreshCw, Trash2 } from "lucide-react";
 
 interface JobRowProps {
   job: JobRecord;
-  onRemove: (id: string) => void;
-  onRetry: (id: string) => void;
+  onRemove: (id: string) => Promise<void> | void;
+  onRetry: (id: string) => Promise<void> | void;
 }
 
 // A small, reusable icon button component
@@ -23,6 +23,8 @@ const IconButton: React.FC<React.ComponentProps<"button">> = ({
 
 export const JobRow: React.FC<JobRowProps> = React.memo(
   ({ job, onRemove, onRetry }) => {
+    const [isRemoving, setIsRemoving] = useState(false);
+    const [isRetrying, setIsRetrying] = useState(false);
     const statusConfig = STATUS_CONFIG[job.status] || STATUS_CONFIG.pending;
     const {
       label: statusLabel,
@@ -53,8 +55,15 @@ export const JobRow: React.FC<JobRowProps> = React.memo(
         ? "bg-green-500"
         : "bg-blue-500";
 
+    const isNew = Date.now() - job.createdAt < 3000;
     return (
-      <div className="px-4 py-2 border-b border-gray-700/60 last:border-b-0 hover:bg-gray-700/40 transition-colors">
+      <div
+        className={`px-4 py-2 border-b border-gray-700/60 last:border-b-0 transition-colors ${
+          isNew
+            ? "bg-blue-700/20 animate-[pulse_2s_ease-in-out_2]"
+            : "hover:bg-gray-700/40"
+        }`}
+      >
         <div className="grid grid-cols-12 gap-2 items-center">
           {/* Created At */}
           <div className="col-span-2 text-xs text-gray-400 tabular-nums">
@@ -120,22 +129,48 @@ export const JobRow: React.FC<JobRowProps> = React.memo(
             )}
             {(job.status === "failed" || job.status === "cancelled") && (
               <IconButton
-                onClick={() => onRetry(job.id)}
+                disabled={isRetrying}
+                onClick={async () => {
+                  try {
+                    setIsRetrying(true);
+                    await onRetry(job.id);
+                  } finally {
+                    setIsRetrying(false);
+                  }
+                }}
                 title="Réessayer"
-                className="text-yellow-400 hover:bg-yellow-500/20"
+                className={`text-yellow-400 hover:bg-yellow-500/20 ${
+                  isRetrying ? "opacity-60 cursor-wait" : ""
+                }`}
               >
-                <RefreshCw size={16} />
+                <RefreshCw
+                  size={16}
+                  className={isRetrying ? "animate-spin" : ""}
+                />
               </IconButton>
             )}
             {(job.status === "completed" ||
               job.status === "failed" ||
               job.status === "cancelled") && (
               <IconButton
-                onClick={() => onRemove(job.id)}
+                disabled={isRemoving}
+                onClick={async () => {
+                  try {
+                    setIsRemoving(true);
+                    await onRemove(job.id);
+                  } finally {
+                    /* keep removing state until unmounted */
+                  }
+                }}
                 title="Supprimer"
-                className="text-red-400 hover:bg-red-500/20"
+                className={`text-red-400 hover:bg-red-500/20 ${
+                  isRemoving ? "opacity-60 cursor-wait" : ""
+                }`}
               >
-                <Trash2 size={16} />
+                <Trash2
+                  size={16}
+                  className={isRemoving ? "animate-pulse" : ""}
+                />
               </IconButton>
             )}
           </div>

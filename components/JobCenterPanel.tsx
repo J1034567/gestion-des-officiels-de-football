@@ -1,6 +1,6 @@
 // src/components/JobCenterPanel.tsx
 import React, { useMemo, useState, useCallback } from "react";
-import { useJobCenter, JobRecord } from "../hooks/useJobCenter";
+import { useJobCenter } from "../hooks/useJobCenter";
 import { JobRow } from "./JobRow";
 import { STATUS_CONFIG } from "./job-center.config";
 import { ChevronUp, ChevronDown } from "lucide-react";
@@ -33,7 +33,7 @@ const SortableHeader: React.FC<{
 );
 
 export const JobCenterPanel: React.FC<JobCenterPanelProps> = ({ onClose }) => {
-  const { jobs, remove, clearCompleted, retry } = useJobCenter();
+  const { ordered, remove, clearCompleted, retry, isClearing } = useJobCenter();
   const [sortKey, setSortKey] = useState<SortKey>("createdAt");
   const [isDesc, setIsDesc] = useState<boolean>(true);
   const [filterActive, setFilterActive] = useState<boolean>(false);
@@ -51,7 +51,7 @@ export const JobCenterPanel: React.FC<JobCenterPanelProps> = ({ onClose }) => {
   );
 
   const sortedJobs = useMemo(() => {
-    const arr = Object.values(jobs);
+    const arr = ordered;
     const filtered = filterActive
       ? arr.filter((j) => j.status === "pending" || j.status === "processing")
       : arr;
@@ -72,7 +72,7 @@ export const JobCenterPanel: React.FC<JobCenterPanelProps> = ({ onClose }) => {
       }
       return isDesc ? -cmp : cmp;
     });
-  }, [jobs, sortKey, isDesc, filterActive]);
+  }, [ordered, sortKey, isDesc, filterActive]);
 
   return (
     <div className="absolute right-2 top-12 w-[720px] max-h-[70vh] flex flex-col bg-gray-800 shadow-xl border border-gray-700 rounded-lg overflow-hidden z-50 text-gray-200">
@@ -94,9 +94,19 @@ export const JobCenterPanel: React.FC<JobCenterPanelProps> = ({ onClose }) => {
             Actives Uniquement
           </button>
           <button
-            className="text-xs px-2 py-1 rounded border bg-gray-700 border-gray-600 hover:bg-gray-600"
-            onClick={clearCompleted}
+            className={`text-xs px-2 py-1 rounded border transition-colors flex items-center gap-2 ${
+              isClearing
+                ? "bg-gray-600 border-gray-500 text-gray-300 cursor-wait"
+                : "bg-gray-700 border-gray-600 hover:bg-gray-600"
+            }`}
+            onClick={() => {
+              if (!isClearing) clearCompleted();
+            }}
+            disabled={isClearing}
           >
+            {isClearing && (
+              <span className="h-3 w-3 rounded-full border-2 border-t-transparent animate-spin" />
+            )}
             Nettoyer
           </button>
           {onClose && (

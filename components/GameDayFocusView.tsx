@@ -335,7 +335,9 @@ export const GameDayFocusView: React.FC<GameDayFocusViewProps> = ({
     role: OfficialRole;
   } | null>(null);
 
-  const { jobs } = useJobCenter();
+  // After Job Center refactor, `jobs` in context is a map. We need an array for .find usages below.
+  // Alias the ordered array to `jobs` to keep existing logic minimal.
+  const { ordered: jobs } = useJobCenter();
   const deriveJobId = useCallback(
     (scope: "all" | string, kind: "pdf" | "email") => {
       const prefix = scope === "all" ? "all" : `match_${scope}`;

@@ -38,10 +38,9 @@ import {
 } from "../../hooks/useAssignments";
 import { upsertOfficial as upsertOfficialService } from "../../services/officialService";
 import { upsertStadium } from "../../services/stadiumService";
-import {
-  generateMissionOrderPDF,
-  downloadBlob,
-} from "../../services/pdfService";
+import { downloadBlob } from "../../services/pdfService";
+import { jobService } from "../../services/jobService";
+import { JobKinds } from "../../supabase/functions/_shared/jobKinds";
 
 interface PlanningContainerProps {
   currentSeason: string;
@@ -385,16 +384,68 @@ const PlanningContainer: React.FC<PlanningContainerProps> = ({
     matchId: string,
     officialId: string
   ) => {
+    const official = officials.find((o) => o.id === officialId);
+    const match = matches.find((m) => m.id === matchId);
+    if (!match || !official) {
+      notify.error("Match ou officiel introuvable.");
+      return;
+    }
+    const dateStr = match?.matchDate || new Date().toISOString().slice(0, 10);
+    const safeName = (official?.fullName || officialId).replace(/\s+/g, "_");
+    notify.info("Génération en arrière-plan de l'ordre de mission…");
     try {
+      const job = await jobService.enqueueJob({
+        type: JobKinds.MissionOrdersSinglePdf,
+        label: `Ordre mission ${official.lastName || officialId}`,
+        payload: {
+          matchId,
+          officialId,
+          fileName: `Ordre_Mission_${safeName}_${dateStr}.pdf`,
+        },
+        total: 1,
+      });
+      // Poll for completion (simple inline polling). If fails or times out, fallback to legacy direct generation.
+      const deadline = Date.now() + 25_000; // 25s timeout
+      let artifactUrl: string | null = null;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const { data, error } = await supabase
+          .from("jobs")
+          .select("status, result, error_message")
+          .eq("id", job.id)
+          .single();
+        if (error) break;
+        if (data?.status === "completed" && data?.result?.artifactUrl) {
+          artifactUrl = data.result.artifactUrl;
+          break;
+        }
+        if (data?.status === "failed") {
+          console.warn(
+            "[PrintMissionOrder] job failed, fallback to direct generation",
+            data.error_message
+          );
+          break;
+        }
+      }
+      if (artifactUrl) {
+        const resp = await fetch(artifactUrl);
+        if (resp.ok) {
+          const blob = await resp.blob();
+          downloadBlob(blob, `Ordre_Mission_${safeName}_${dateStr}.pdf`);
+          notify.success("Ordre de mission téléchargé.");
+          return;
+        }
+      }
+      // Fallback path: direct generation (only if no artifact produced)
+      notify.info("Fallback génération directe…");
+      const { generateMissionOrderPDF } = await import(
+        "../../services/pdfService"
+      );
       const blob = await generateMissionOrderPDF(matchId, officialId);
-      const official = officials.find((o) => o.id === officialId);
-      const match = matches.find((m) => m.id === matchId);
-      const dateStr = match?.matchDate || new Date().toISOString().slice(0, 10);
-      const safeName = (official?.fullName || officialId).replace(/\s+/g, "_");
       downloadBlob(blob, `Ordre_Mission_${safeName}_${dateStr}.pdf`);
-      notify.success("Ordre de mission généré.");
+      notify.success("Ordre de mission généré (fallback).");
     } catch (e: any) {
-      notify.error(`Erreur génération PDF: ${e?.message || e}`);
+      notify.error(`Erreur génération ordre de mission: ${e?.message || e}`);
     }
   };
 

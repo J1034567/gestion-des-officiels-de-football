@@ -1,5 +1,6 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createSupabaseAdminClient, createJsonResponse } from '../_shared/supabaseAdmin.ts';
+import { JobKinds, isMatchSheetsBulkEmail } from '../_shared/jobKinds.ts';
 
 serve(async (req) => {
     const payload = await req.json();
@@ -15,16 +16,26 @@ serve(async (req) => {
         // Asynchronously invoke the correct worker based on job type
         // We don't `await` this, so the webhook responds immediately.
         switch (job.type) {
-            case 'mission_orders.bulk_pdf':
+            // Mission orders PDF (bulk & single)
+            case JobKinds.MissionOrdersBulkPdf:
+            case JobKinds.MissionOrdersSinglePdf:
                 supabase.functions.invoke('worker-bulk-pdf', { body: { job } });
                 break;
-            case 'mission_orders.email_bulk':
+            // Match sheets bulk email (canonical) + legacy alias
+            case JobKinds.MatchSheetsBulkEmail:
+            case JobKinds.LegacyMissionOrdersEmailBulk: // compatibility
                 supabase.functions.invoke('worker-bulk-email', { body: { job } });
                 break;
-
+            // Mission order single email (mission order pdf for one official + match sheet email)
+            case JobKinds.MissionOrdersSingleEmail:
+                supabase.functions.invoke('worker-bulk-email', { body: { job } });
+                break;
+            // Messaging bulk email (simple broadcast)
+            case JobKinds.MessagingBulkEmail:
+                supabase.functions.invoke('worker-bulk-email', { body: { job } });
+                break;
             default:
-                console.warn(`No worker found for job type: ${job.type}`);
-                // Optionally update the job to failed status here
+                console.warn(`[job-trigger] No worker found for job type: ${job.type}`);
                 await supabase.from('jobs').update({
                     status: 'failed',
                     error_message: `Unknown job type: ${job.type}`
@@ -35,12 +46,11 @@ serve(async (req) => {
 
     } catch (error) {
         console.error('Error invoking worker function:', error);
-        // Update the job to failed status if invocation fails
+        const message = (error as any)?.message || 'Unknown error';
         await supabase.from('jobs').update({
             status: 'failed',
-            error_message: `Failed to invoke worker: ${error.message}`
+            error_message: `Failed to invoke worker: ${message}`
         }).eq('id', job.id);
-
         return createJsonResponse({ error: 'Failed to trigger job worker' }, 500);
     }
 });

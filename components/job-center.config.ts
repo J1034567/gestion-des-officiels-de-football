@@ -1,6 +1,6 @@
 // src/components/job-center.config.ts
 import { CheckCircle2, XCircle, AlertTriangle, Zap, Hourglass, Loader, Pause, RotateCcw } from 'lucide-react';
-import { JobRecord } from '../hooks/useJobCenter';
+import type { JobRecord } from '../hooks/useJobCenter';
 
 export type JobStatus = JobRecord['status'];
 

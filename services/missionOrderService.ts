@@ -4,10 +4,23 @@ import { supabase } from '../lib/supabaseClient';
 import { hashMissionOrders } from '../utils/hash';
 
 /**
- * Mission Order Service (Phase 1)
- * - Adds an in-memory LRU cache for individual mission order PDFs to avoid regenerating during a session.
- * - Provides bulk fetch & merge with progress callback.
- * - Keeps existing pdfService functions untouched for backward compatibility.
+ * Mission Order Service (Legacy / Transitional)
+ * ---------------------------------------------------------------------------
+ * This module originally handled client-side generation & merging of mission
+ * order PDFs with an in-memory cache. The platform is migrating to a fully
+ * job-based architecture where PDF generation (single & bulk) occurs in
+ * Supabase Edge Functions and is tracked through the `jobs` table.
+ *
+ * New Path (Preferred):
+ *   - Bulk PDF: enqueue job type `mission_orders.bulk_pdf` with payload { orders: [...] }
+ *   - Single PDF: enqueue job type `mission_orders.single_pdf` with payload { matchId, officialId }
+ *   - Single email (mission order + match sheet): job type `mission_orders.single_email`
+ *   - Bulk match sheets email: job type `match_sheets.bulk_email`
+ *
+ * Remaining Uses: The UI may still call certain helpers here for fallback or
+ * scenarios not yet migrated. Plan to remove once all consumers enqueue jobs.
+ *
+ * DEPRECATION: Avoid adding new logic here. Prefer job-based workers.
  */
 
 export interface MissionOrderRequest {
