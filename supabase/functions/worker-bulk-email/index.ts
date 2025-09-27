@@ -124,13 +124,25 @@ serve(async (req: Request) => {
             };
             const { subject, html } = generateMatchSheetHtml(transformedMatchSingle, adaptedOfficialsSingle, !!match.is_sheet_sent, locations);
             const attachments = base64Pdf ? [{ content: base64Pdf, filename: `ordre_de_mission_${official.last_name}_${match.homeTeam.code}_${match.awayTeam.code}.pdf`, type: 'application/pdf', disposition: 'attachment' }] : [];
-            const { error: invokeError } = await supabase.functions.invoke('send-email', {
-                body: { to: [official.email], subject, html, attachments },
-                headers: { Authorization: `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}` }
-            });
-            if (invokeError) throw invokeError;
-            await supabase.from('jobs').update({ status: 'completed', progress: 1, result: { sent: 1 } }).eq('id', job.id);
-            return createJsonResponse({ success: true, sent: 1 });
+            try {
+                const { error: invokeError } = await supabase.functions.invoke('send-email', {
+                    body: { to: [official.email], subject, html, attachments },
+                    headers: { Authorization: `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}` }
+                });
+                if (invokeError) {
+                    // Mark match sheet as not sent on failure
+                    await supabase.from('matches').update({ is_sheet_sent: false }).eq('id', matchId);
+                    throw invokeError;
+                }
+                // Success path -> mark sheet sent
+                await supabase.from('matches').update({ is_sheet_sent: true, has_unsent_changes: false }).eq('id', matchId);
+                await supabase.from('jobs').update({ status: 'completed', progress: 1, result: { sent: 1 } }).eq('id', job.id);
+                return createJsonResponse({ success: true, sent: 1 });
+            } catch (singleSendErr) {
+                // Ensure failure state reflected even if exception thrown mid process
+                try { await supabase.from('matches').update({ is_sheet_sent: false }).eq('id', matchId); } catch { /* swallow */ }
+                throw singleSendErr;
+            }
         }
 
         // Default path: bulk match sheets email (canonical or legacy)
@@ -291,6 +303,10 @@ serve(async (req: Request) => {
 
             } catch (e) {
                 console.error(`[worker-bulk-email] Failed to process match ${match.id}:`, e);
+                // Explicitly flag the sheet as NOT sent if any failure occurs after attempting processing
+                try {
+                    await supabase.from('matches').update({ is_sheet_sent: false }).eq('id', match.id);
+                } catch { /* ignore secondary failure */ }
             } finally {
                 // We increment progress regardless of per-match failure to ensure the job completes
                 completedCount++;
