@@ -35,8 +35,9 @@ export interface MissionOrdersSingleEmailPayload extends BaseJobPayload {
 
 export interface MatchSheetsBulkEmailPayload extends BaseJobPayload {
     matchIds: string[]; // which match sheets to include
-    recipients: { email: string; name?: string }[];
-    subject: string;
+    // Made optional to allow server-side enrichment (legacy callers only had matchIds)
+    recipients?: { email: string; name?: string }[];
+    subject?: string;
     message?: string; // plain text or fallback content
     html?: string; // optional HTML version
     attachments?: { filename: string; content: string; type?: string; disposition?: string }[];
@@ -44,6 +45,8 @@ export interface MatchSheetsBulkEmailPayload extends BaseJobPayload {
 
 export interface MessagingBulkEmailPayload extends BaseJobPayload {
     officialIds: string[]; subject: string; message: string;
+    // Recipients expanded shape (derived from officialIds) - allow passing fully resolved recipients
+    recipients?: { email: string; name?: string; id?: string }[];
 }
 
 export type AnyJobPayload = MissionOrdersBulkPdfPayload | MissionOrdersSinglePdfPayload | MissionOrdersSingleEmailPayload | MatchSheetsBulkEmailPayload | MessagingBulkEmailPayload | BaseJobPayload;

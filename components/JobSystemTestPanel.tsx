@@ -111,10 +111,10 @@ export const JobSystemTestPanel: React.FC = () => {
   const handleRunTests = async () => {
     setIsRunning(true);
     setResults([]);
-    showNotification(
-      `Starting ${tests[selectedTest as keyof typeof tests]}...`,
-      "info"
-    );
+    showNotification({
+      message: `Starting ${tests[selectedTest as keyof typeof tests]}...`,
+      type: "info",
+    });
 
     try {
       if (selectedTest === "all") {
@@ -146,12 +146,17 @@ export const JobSystemTestPanel: React.FC = () => {
         const totalCount = testResults.length;
 
         if (successCount === totalCount) {
-          showNotification(`All ${totalCount} tests passed! 🎉`, "success");
+          showNotification({
+            message: `All ${totalCount} tests passed! 🎉`,
+            type: "success",
+          });
         } else {
-          showNotification(
-            `${totalCount - successCount} out of ${totalCount} tests failed.`,
-            "error"
-          );
+          showNotification({
+            message: `${
+              totalCount - successCount
+            } out of ${totalCount} tests failed.`,
+            type: "error",
+          });
         }
       } else {
         // Run single test
@@ -167,21 +172,26 @@ export const JobSystemTestPanel: React.FC = () => {
         setResults([result]);
 
         if (result.status === "success") {
-          showNotification(
-            `Test "${tests[selectedTest as keyof typeof tests]}" passed! ✅`,
-            "success"
-          );
+          showNotification({
+            message: `Test "${
+              tests[selectedTest as keyof typeof tests]
+            }" passed! ✅`,
+            type: "success",
+          });
         } else {
-          showNotification(
-            `Test "${tests[selectedTest as keyof typeof tests]}" failed: ${
-              result.message
-            }`,
-            "error"
-          );
+          showNotification({
+            message: `Test "${
+              tests[selectedTest as keyof typeof tests]
+            }" failed: ${result.message}`,
+            type: "error",
+          });
         }
       }
     } catch (error: any) {
-      showNotification(`Test execution failed: ${error.message}`, "error");
+      showNotification({
+        message: `Test execution failed: ${error.message}`,
+        type: "error",
+      });
       setResults((prev) =>
         prev.map((r) => ({
           ...r,

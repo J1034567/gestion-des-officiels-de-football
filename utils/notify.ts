@@ -1,6 +1,15 @@
-export type NotifyFn = (message: string, type?: "success" | "error" | "info") => void;
+import type { NotificationType } from "../contexts/NotificationContext";
 
-export function makeNotifier(show: NotifyFn) {
+// Accept both legacy positional signature and new object signature
+export type NotifyFn = (
+    message: string,
+    type?: NotificationType
+) => any; // showNotification returns an id
+
+export function makeNotifier(show: (
+    message: string,
+    type?: NotificationType
+) => any) {
     return {
         success: (msg: string) => show(msg, "success"),
         error: (msg: string) => show(msg, "error"),

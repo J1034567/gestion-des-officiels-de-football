@@ -7,7 +7,7 @@ import React, {
 } from "react";
 import Toast from "../components/Toast";
 
-export type NotificationType = "success" | "error" | "info";
+export type NotificationType = "success" | "error" | "info" | "warning"; // extended with warning (Toast supports it)
 
 export interface NotificationState {
   id: string;
@@ -19,11 +19,25 @@ export interface NotificationState {
   persist?: boolean; // if true, won't auto dismiss
 }
 
+// Legacy convenience signature support
+export type ShowNotificationFn = {
+  // Modern object form
+  (opts: Omit<NotificationState, "createdAt" | "id"> & { id?: string }): string;
+  // Legacy positional form: (message, type?, extras?)
+  (
+    message: string,
+    type?: NotificationType,
+    extras?: Partial<
+      Pick<NotificationState, "group" | "autoCloseMs" | "persist">
+    > & {
+      id?: string;
+    }
+  ): string;
+};
+
 interface NotificationContextValue {
   notifications: NotificationState[];
-  showNotification: (
-    opts: Omit<NotificationState, "createdAt" | "id"> & { id?: string }
-  ) => string; // returns id
+  showNotification: ShowNotificationFn; // returns id
   closeNotification: (id: string) => void;
   closeGroup: (group: string) => void;
   replaceGroup: (
@@ -66,17 +80,46 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({
     setNotifications((prev) => prev.filter((n) => n.group !== group));
   }, []);
 
-  const showNotification = useCallback(
-    (opts: Omit<NotificationState, "createdAt" | "id"> & { id?: string }) => {
+  const showNotification = useCallback<ShowNotificationFn>(
+    (
+      arg1:
+        | (Omit<NotificationState, "createdAt" | "id"> & { id?: string })
+        | string,
+      maybeType?: NotificationType,
+      extras?: Partial<
+        Pick<NotificationState, "group" | "autoCloseMs" | "persist">
+      > & {
+        id?: string;
+      }
+    ) => {
+      // Normalize arguments to object form
+      const opts: Omit<NotificationState, "createdAt" | "id"> & {
+        id?: string;
+      } =
+        typeof arg1 === "string"
+          ? {
+              message: arg1,
+              type: maybeType || "info",
+              group: extras?.group,
+              autoCloseMs: extras?.autoCloseMs,
+              persist: extras?.persist,
+              id: extras?.id,
+            }
+          : arg1;
+
+      if (!opts.message || opts.message.trim() === "") {
+        // Silently ignore empty message requests to avoid blank toasts
+        return crypto.randomUUID();
+      }
       const id = opts.id || crypto.randomUUID();
       setNotifications((prev) => {
-        // If same id exists replace
         const existingIdx = prev.findIndex((n) => n.id === id);
         const next = [...prev];
         const record: NotificationState = {
           id,
           message: opts.message,
-          type: opts.type,
+          // Ensure unknown type falls back to info
+          type: (opts.type as NotificationType) || "info",
           group: opts.group,
           createdAt: Date.now(),
           autoCloseMs: opts.autoCloseMs ?? (opts.type === "info" ? 4000 : 6000),

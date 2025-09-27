@@ -19,7 +19,7 @@ import {
 const VirementsContainer: React.FC = () => {
   const { user, permissions } = useAuth();
   const { showNotification } = useNotificationContext();
-  const notify = makeNotifier(showNotification);
+  const notify = makeNotifier((m, t) => showNotification(m, t));
   const queryClient = useQueryClient();
 
   const { data: paymentsData } = usePayments({
@@ -111,7 +111,9 @@ const VirementsContainer: React.FC = () => {
       onCancelPaymentBatch={onCancelPaymentBatch}
       onSaveProofOfPayment={onSaveProofOfPayment}
       users={users || []}
-      showNotification={showNotification}
+      showNotification={(m: string, t: "success" | "error" | "info") =>
+        showNotification(m, t)
+      }
     />
   );
 };

@@ -49,7 +49,7 @@ type Props = {
 const SettingsContainer: React.FC<Props> = ({ currentSeason }) => {
   const { user, permissions } = useAuth();
   const { showNotification } = useNotificationContext();
-  const notify = makeNotifier(showNotification);
+  const notify = makeNotifier((m, t) => showNotification(m, t));
   const queryClient = useQueryClient();
 
   const { data: settings } = useAppSettings();

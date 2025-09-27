@@ -45,7 +45,7 @@ const ClubsContainer: React.FC<{ currentSeason: string }> = ({
 
   const queryClient = useQueryClient();
   const { showNotification } = useNotificationContext();
-  const notify = makeNotifier(showNotification);
+  const notify = makeNotifier((m, t) => showNotification(m, t));
 
   const onSaveTeam = async (team: Team) => {
     try {

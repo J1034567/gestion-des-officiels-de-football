@@ -38,7 +38,7 @@ const OfficialsContainer: React.FC = () => {
 
   const queryClient = useQueryClient();
   const { showNotification } = useNotificationContext();
-  const notify = makeNotifier(showNotification);
+  const notify = makeNotifier((m, t) => showNotification(m, t));
 
   const onUpdateUnavailabilities = async (
     officialId: string,

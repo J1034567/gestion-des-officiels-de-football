@@ -21,7 +21,7 @@ import {
 const FinancesContainer: React.FC = () => {
   const { user, permissions } = useAuth();
   const { showNotification } = useNotificationContext();
-  const notify = makeNotifier(showNotification);
+  const notify = makeNotifier((m, t) => showNotification(m, t));
   const queryClient = useQueryClient();
 
   const { data: paymentsData } = usePayments({

@@ -18,7 +18,7 @@ export function useSendMatchSheet() {
             const job = await jobService.enqueueJob({
                 type: JobKinds.MatchSheetsBulkEmail,
                 label: `Envoi feuille match ${match.homeTeam.code} vs ${match.awayTeam.code}`,
-                payload: { matchIds: [match.id] },
+                payload: { matchIds: [match.id] }, // recipients/subject resolved server-side
                 total: 1,
             });
             return job; // Caller can observe via job center

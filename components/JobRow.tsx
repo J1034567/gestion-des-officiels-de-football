@@ -1,5 +1,5 @@
 // src/components/JobRow.tsx
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect, useRef } from "react";
 import type { JobRecord } from "../hooks/useJobCenter";
 import { STATUS_CONFIG, formatDuration } from "./job-center.config";
 import { JOB_KIND_META, STATUS_DISPLAY } from "./job-kind-meta";
@@ -26,6 +26,98 @@ export const JobRow: React.FC<JobRowProps> = React.memo(
   ({ job, onRemove, onRetry }) => {
     const [isRemoving, setIsRemoving] = useState(false);
     const [isRetrying, setIsRetrying] = useState(false);
+    const lastPhaseRef = useRef<string | null>(null);
+    const [phaseGlow, setPhaseGlow] = useState(false);
+
+    // Phase boundary glow
+    useEffect(() => {
+      const current = job.phase || job.meta?.phase || null;
+      if (current && lastPhaseRef.current && current !== lastPhaseRef.current) {
+        // Trigger glow animation on phase boundary change
+        setPhaseGlow(true);
+        const t = setTimeout(() => setPhaseGlow(false), 1200);
+        return () => clearTimeout(t);
+      }
+      if (!lastPhaseRef.current && current) {
+        // first assignment – no animation
+      }
+      lastPhaseRef.current = current;
+    }, [job.phase, job.meta?.phase]);
+
+    // Track previous intra-phase value to enable smooth animated transitions.
+    const lastIntraRef = useRef<number | null>(null);
+    const [animateBump, setAnimateBump] = useState(false);
+    // Optimistic progress simulation when backend only reports 0 then 100
+    const [optimisticPct, setOptimisticPct] = useState<number | null>(null);
+    const optimisticPhaseRef = useRef<string | null>(null);
+    const rafRef = useRef<number | null>(null);
+
+    useEffect(() => {
+      const phase = job.phase || job.meta?.phase || null;
+      const real = job.phaseProgress ?? job.meta?.phase_progress ?? null;
+      // Reset when phase changes
+      if (optimisticPhaseRef.current !== phase) {
+        optimisticPhaseRef.current = phase;
+        setOptimisticPct(null);
+      }
+      // If we have a real incremental value, adopt it and stop sim
+      if (typeof real === "number" && real > 0 && real < 100) {
+        setOptimisticPct(null);
+        return;
+      }
+      if (phase && (real === null || real === 0)) {
+        // Start / continue optimistic animation up to a soft cap (e.g., 85%)
+        const start = performance.now();
+        const base = optimisticPct ?? 0;
+        const cap = 85; // do not exceed to avoid lying about near-completion
+        const durationMs = 8000; // time to reach cap if uninterrupted
+        const tick = (ts: number) => {
+          const elapsed = ts - start;
+          // Ease-out curve
+          let ratio = Math.min(1, elapsed / durationMs);
+          ratio = 1 - Math.pow(1 - ratio, 2);
+          const next = Math.min(cap, base + (cap - base) * ratio);
+          setOptimisticPct(next);
+          if (
+            next < cap &&
+            (job.phaseProgress ?? job.meta?.phase_progress ?? 0) === 0 &&
+            job.status === "processing"
+          ) {
+            rafRef.current = requestAnimationFrame(tick);
+          }
+        };
+        if (rafRef.current) cancelAnimationFrame(rafRef.current);
+        rafRef.current = requestAnimationFrame(tick);
+        return () => {
+          if (rafRef.current) cancelAnimationFrame(rafRef.current);
+        };
+      } else {
+        // If real finishes (100) or no phase, clear simulation
+        setOptimisticPct(null);
+      }
+    }, [
+      job.phase,
+      job.meta?.phase,
+      job.phaseProgress,
+      job.meta?.phase_progress,
+      job.status,
+    ]);
+    useEffect(() => {
+      const currentIntra =
+        job.phaseProgress ?? job.meta?.phase_progress ?? null;
+      if (
+        typeof currentIntra === "number" &&
+        typeof lastIntraRef.current === "number"
+      ) {
+        if (currentIntra > lastIntraRef.current) {
+          // Trigger a subtle bump animation to visually show progress arrival
+          setAnimateBump(true);
+          const t = setTimeout(() => setAnimateBump(false), 400);
+          return () => clearTimeout(t);
+        }
+      }
+      lastIntraRef.current = currentIntra;
+    }, [job.phaseProgress, job.meta?.phase_progress]);
     const statusConfig = STATUS_CONFIG[job.status] || STATUS_CONFIG.pending;
     const {
       label: statusLabel,
@@ -127,6 +219,7 @@ export const JobRow: React.FC<JobRowProps> = React.memo(
               const meta =
                 JOB_KIND_META[job.type as keyof typeof JOB_KIND_META];
               const phaseLabels = meta?.phaseLabels;
+              const phaseWeights = meta?.phaseWeights;
               const phases = phaseLabels ? Object.keys(phaseLabels) : [];
               const currentPhase = job.phase || job.meta?.phase || null;
               const withinPhasePct =
@@ -142,15 +235,68 @@ export const JobRow: React.FC<JobRowProps> = React.memo(
                   </div>
                 );
               }
-              // Build segments equally spaced unless we later add weights
-              const segmentCount = phases.length;
-              const segmentWidth = 100 / segmentCount;
+              // Weighted or equal segments
+              const segmentDefs = phases.map((p) => {
+                const weight = phaseWeights?.find((w) => w.name === p)?.weight;
+                return {
+                  name: p,
+                  weight:
+                    typeof weight === "number" ? weight : 100 / phases.length,
+                };
+              });
+              const totalWeight =
+                segmentDefs.reduce((a, b) => a + b.weight, 0) || 1;
+              const normalized = segmentDefs.map((s) => ({
+                ...s,
+                pct: (s.weight / totalWeight) * 100,
+              }));
               const currentIdx = currentPhase
                 ? phases.indexOf(currentPhase)
                 : -1;
               return (
-                <div className="flex h-2 w-full overflow-hidden rounded bg-gray-700">
-                  {phases.map((p, idx) => {
+                <div
+                  className={`flex h-2 w-full overflow-hidden rounded bg-gray-700 relative ${
+                    phaseGlow
+                      ? "ring-2 ring-blue-400/60 shadow-[0_0_8px_2px_rgba(96,165,250,0.6)] transition-all"
+                      : "ring-0"
+                  } ${animateBump ? "[animation:ping_0.6s_ease-in-out]" : ""}`}
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={(() => {
+                    const meta =
+                      JOB_KIND_META[job.type as keyof typeof JOB_KIND_META];
+                    if (!meta?.phaseWeights || !job.phase) return progressPct;
+                    const weights = meta.phaseWeights;
+                    const total =
+                      weights.reduce((a, b) => a + b.weight, 0) || 1;
+                    let acc = 0;
+                    for (const w of weights) {
+                      if (w.name === job.phase) {
+                        const intra =
+                          (job.phaseProgress ?? job.meta?.phase_progress ?? 0) /
+                          100;
+                        acc += w.weight * intra;
+                        break;
+                      } else acc += w.weight;
+                    }
+                    return Math.min(
+                      100,
+                      Math.max(0, Math.round((acc / total) * 100))
+                    );
+                  })()}
+                  aria-label={(() => {
+                    const meta =
+                      JOB_KIND_META[job.type as keyof typeof JOB_KIND_META];
+                    const phase = job.phase || job.meta?.phase;
+                    const phaseLabel = phase && meta?.phaseLabels?.[phase];
+                    return phaseLabel
+                      ? `${meta?.shortLabel || job.type} – ${phaseLabel}`
+                      : `${meta?.shortLabel || job.type}`;
+                  })()}
+                >
+                  {normalized.map((seg, idx) => {
+                    const p = seg.name;
                     const isCompleted =
                       job.status === "completed" ||
                       idx < currentIdx ||
@@ -169,32 +315,93 @@ export const JobRow: React.FC<JobRowProps> = React.memo(
                         : "bg-blue-500";
                     let innerPct = 0;
                     if (isCompleted) innerPct = 100;
-                    else if (isCurrent && typeof withinPhasePct === "number")
-                      innerPct = Math.min(100, Math.max(0, withinPhasePct));
+                    else if (isCurrent) {
+                      if (typeof withinPhasePct === "number") {
+                        innerPct = Math.min(100, Math.max(0, withinPhasePct));
+                      } else if (optimisticPct !== null) {
+                        innerPct = optimisticPct;
+                      }
+                    }
+                    const weightPct = Math.round(
+                      (seg.weight / totalWeight) * 100
+                    );
+                    const displayIntra =
+                      typeof withinPhasePct === "number"
+                        ? withinPhasePct.toFixed(0)
+                        : isCurrent && optimisticPct !== null
+                        ? Math.round(optimisticPct).toString() + "~"
+                        : undefined;
+                    const tooltip = `${phaseLabels[p]} (${weightPct}%${
+                      displayIntra ? ` – ${displayIntra}%` : ""
+                    })`;
                     return (
                       <div
                         key={p}
                         className={`relative ${baseColor}`}
-                        style={{ width: `${segmentWidth}%` }}
-                        title={phaseLabels[p]}
+                        style={{ width: `${seg.pct}%` }}
+                        title={tooltip}
                       >
                         <div
-                          className={`h-full transition-all duration-300 ease-out ${
+                          className={`h-full transition-all duration-500 ease-[cubic-bezier(.4,0,.2,1)] ${
                             innerPct > 0 ? fillColor : ""
+                          } ${
+                            innerPct > 0 && innerPct < 100 ? "shadow-inner" : ""
+                          } ${
+                            isCurrent &&
+                            optimisticPct !== null &&
+                            typeof withinPhasePct !== "number"
+                              ? "animate-[pulse_2s_ease-in-out_infinite]"
+                              : ""
                           }`}
                           style={{ width: `${innerPct}%` }}
-                        />
-                        {idx < segmentCount - 1 && (
+                        >
+                          {isCurrent &&
+                            typeof withinPhasePct !== "number" &&
+                            innerPct === 0 && (
+                              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-[shimmer_1.2s_linear_infinite]" />
+                            )}
+                        </div>
+                        {idx < normalized.length - 1 && (
                           <div className="absolute top-0 right-0 h-full w-px bg-gray-800/70" />
                         )}
                       </div>
                     );
                   })}
+                  {phaseGlow && (
+                    <div className="pointer-events-none absolute inset-0 animate-pulse bg-blue-400/10" />
+                  )}
                 </div>
               );
             })()}
             <div className="text-[10px] text-gray-400 flex justify-between items-center">
-              <span>{progressPct}%</span>
+              <span>
+                {(() => {
+                  // If we have weighted phases and current phase progress, derive overall weighted progress for display
+                  const meta =
+                    JOB_KIND_META[job.type as keyof typeof JOB_KIND_META];
+                  if (!meta?.phaseWeights || !job.phase)
+                    return `${progressPct}%`;
+                  const weights = meta.phaseWeights;
+                  const total = weights.reduce((a, b) => a + b.weight, 0) || 1;
+                  let acc = 0;
+                  for (const w of weights) {
+                    if (w.name === job.phase) {
+                      const intra =
+                        (job.phaseProgress ?? job.meta?.phase_progress ?? 0) /
+                        100;
+                      acc += w.weight * intra;
+                      break;
+                    } else {
+                      acc += w.weight; // completed
+                    }
+                  }
+                  const overall = Math.min(
+                    100,
+                    Math.max(0, Math.round((acc / total) * 100))
+                  );
+                  return `${overall}%`;
+                })()}
+              </span>
               <span className="truncate">
                 {(() => {
                   const meta =

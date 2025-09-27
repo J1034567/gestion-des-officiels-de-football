@@ -67,7 +67,11 @@ export const AppRouter = () => {
 
   const { showNotification } = useNotificationContext();
   React.useEffect(() => {
-    setExportServiceNotifier(showNotification);
+    // Adapter: wrap overloaded showNotification into simple (msg,type) form expected by export service
+    setExportServiceNotifier(
+      (msg: string, type?: "success" | "error" | "info") =>
+        showNotification(msg, type)
+    );
   }, [showNotification]);
 
   // Initialize season from localStorage if available; otherwise default to latest from settings

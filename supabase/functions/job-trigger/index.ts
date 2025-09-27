@@ -23,7 +23,6 @@ serve(async (req) => {
                 break;
             // Match sheets bulk email (canonical) + legacy alias
             case JobKinds.MatchSheetsBulkEmail:
-            case JobKinds.LegacyMissionOrdersEmailBulk: // compatibility
                 supabase.functions.invoke('worker-bulk-email', { body: { job } });
                 break;
             // Mission order single email (mission order pdf for one official + match sheet email)

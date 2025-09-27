@@ -12,7 +12,7 @@ const Auth: React.FC = () => {
   const [fullName, setFullName] = useState("");
   const [view, setView] = useState<"login" | "signup" | "recovery">("login");
   const { showNotification } = useNotificationContext();
-  const notify = makeNotifier(showNotification);
+  const notify = makeNotifier((m, t) => showNotification(m, t));
 
   const handleAuth = async () => {
     setLoading(true);

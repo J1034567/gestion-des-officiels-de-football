@@ -102,7 +102,10 @@ const PlanningContainer: React.FC<PlanningContainerProps> = ({
 }) => {
   const { user, permissions } = useAuth();
   const { showNotification } = useNotificationContext();
-  const notify = makeNotifier(showNotification);
+  const notify = makeNotifier((m, t) => showNotification(m, t));
+  // NOTE: Pour les envois de feuilles et ordres de mission, les toasts manuels
+  // ont été retirés (demande utilisateur) afin d'éviter les doublons avec
+  // JobLifecycleToasts. Ne réintroduire que si l'on désactive les lifecycle toasts.
   const queryClient = useQueryClient();
 
   // Fetch only what Dashboard needs for Planning route
@@ -242,13 +245,13 @@ const PlanningContainer: React.FC<PlanningContainerProps> = ({
       notify.error("Match introuvable pour envoi de feuille.");
       return;
     }
-    notify.info("Envoi de la feuille de match en cours...");
+    // Notifications manuelles retirées : on laisse JobLifecycleToasts gérer
+    // (processing / completed / failed) via les jobs enqueue.
     await sendMatchSheet({
       match,
       officials,
       locations: appSettings?.locations || [],
     });
-    notify.success("Feuille de match envoyée.");
   };
 
   const localOnSendAllMissionOrders = async (matchId: string) => {
@@ -264,7 +267,6 @@ const PlanningContainer: React.FC<PlanningContainerProps> = ({
       notify.error("Aucun officiel désigné avec un email pour ce match.");
       return;
     }
-    notify.info(`Envoi en cours pour ${assignedOfficials.length} officiels...`);
     await Promise.all(
       assignedOfficials.map(async (o) => {
         try {
@@ -277,7 +279,7 @@ const PlanningContainer: React.FC<PlanningContainerProps> = ({
         } catch (_) {}
       })
     );
-    notify.success("Envois terminés.");
+    // Succès / échecs individuels seront reflétés par les toasts de lifecycle.
   };
 
   const localOnUpdateAssignment = async (

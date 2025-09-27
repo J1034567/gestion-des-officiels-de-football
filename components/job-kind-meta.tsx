@@ -16,6 +16,8 @@ export interface JobKindMeta {
   icon: React.ReactNode;
   hasArtifact?: boolean;
   phaseLabels?: Record<string, string>;
+  /** Ordered list of phase weights (must sum to 100 ideally). Mirrors backend PHASE_WEIGHTS for accurate progress */
+  phaseWeights?: { name: string; weight: number }[];
   successToast?: (job: any) => string;
   failureToast?: (job: any) => string;
 }
@@ -39,6 +41,13 @@ export const JOB_KIND_META: Record<JobKind, JobKindMeta> = {
       merge_documents: "Fusion",
       upload_artifact: "Téléversement",
     },
+    phaseWeights: [
+      { name: "validation", weight: 5 },
+      { name: "fetch_data", weight: 15 },
+      { name: "generate_pdfs", weight: 50 },
+      { name: "merge_documents", weight: 20 },
+      { name: "upload_artifact", weight: 10 },
+    ],
     successToast: (job) => {
       const stats = job.meta?.generate_stats || job.payload?.generate_stats;
       const succeeded = stats?.succeeded ?? "—";
@@ -58,6 +67,16 @@ export const JOB_KIND_META: Record<JobKind, JobKindMeta> = {
     isBulk: false,
     icon: <PrinterIcon className="h-4 w-4" />,
     hasArtifact: true,
+    phaseLabels: {
+      validation: "Validation",
+      generate: "Génération",
+      upload_artifact: "Téléversement",
+    },
+    phaseWeights: [
+      { name: "validation", weight: 10 },
+      { name: "generate", weight: 70 },
+      { name: "upload_artifact", weight: 20 },
+    ],
     successToast: () => "Ordre de mission généré",
     failureToast: (job) =>
       `Échec génération (${job.error || "Erreur inconnue"})`,
@@ -85,6 +104,20 @@ export const JOB_KIND_META: Record<JobKind, JobKindMeta> = {
     category: "emails",
     isBulk: true,
     icon: <CheckCircleIcon className="h-4 w-4" />,
+    phaseLabels: {
+      validation: "Validation",
+      prepare_recipients: "Préparation destinataires",
+      render_templates: "Rendu des modèles",
+      send_emails: "Envoi des emails",
+      cleanup: "Nettoyage",
+    },
+    phaseWeights: [
+      { name: "validation", weight: 5 },
+      { name: "prepare_recipients", weight: 10 },
+      { name: "render_templates", weight: 25 },
+      { name: "send_emails", weight: 50 },
+      { name: "cleanup", weight: 10 },
+    ],
     successToast: (job) => {
       const stats = job.meta?.email_stats || job.payload?.email_stats;
       if (stats) return `Emails: ${stats.completed}/${stats.total} envoyés`;

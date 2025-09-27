@@ -4,6 +4,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 // Use the new, corrected client helper
 import { createSupabaseClient } from '../_shared/supabaseClient.ts';
 // We still need an admin client for inserting into the DB, bypassing RLS
+// @ts-ignore - Deno edge function (types resolved in Deno runtime, not frontend build)
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders, createCorsResponse } from '../_shared/cors.ts';
 
@@ -29,7 +30,9 @@ serve(async (req) => {
         // 2. The user is authenticated. Now, use an ADMIN client to perform the database insertion.
         // This is a secure pattern: verify user, then act on their behalf with elevated privileges.
         const supabaseAdmin = createClient(
+            // @ts-ignore Deno global
             Deno.env.get('SUPABASE_URL')!,
+            // @ts-ignore Deno global
             Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
         );
 

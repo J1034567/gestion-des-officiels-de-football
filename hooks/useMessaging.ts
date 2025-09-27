@@ -28,7 +28,7 @@ export function useSendBulkMessage() {
                 type: JobKinds.MessagingBulkEmail,
                 label: `Envoi message (${recipients.length})`,
                 total: recipients.length,
-                payload: { recipients, subject, message }
+                payload: { officialIds, recipients, subject, message }
             });
 
             return {
