@@ -7,6 +7,7 @@ import {
 import { AppRouter } from "./components/AppRouter";
 import { useAuth } from "./contexts/AuthContext";
 import VerificationPage from "./components/VerificationPage";
+import JobLifecycleToasts from "./components/JobLifecycleToasts";
 
 const App: React.FC = () => {
   const { session, isLoading } = useAuth();
@@ -32,6 +33,7 @@ const App: React.FC = () => {
     <NotificationProvider>
       <div className="min-h-screen bg-gray-900">
         <NotificationToaster />
+        <JobLifecycleToasts />
         {!session ? <Auth /> : <AppRouter />}
       </div>
     </NotificationProvider>

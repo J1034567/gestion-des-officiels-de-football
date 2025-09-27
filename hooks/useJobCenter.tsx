@@ -8,6 +8,7 @@ import React, {
 } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "../lib/supabaseClient";
+import { JOB_KIND_META } from "../components/job-kind-meta";
 
 // Local canonical JobRecord type exported for consumers (panels, rows, config)
 export interface JobRecord {
@@ -17,6 +18,8 @@ export interface JobRecord {
   scope?: string | null;
   createdAt: number; // epoch ms
   updatedAt: number; // epoch ms
+  phase?: string | null; // current backend phase
+  phaseProgress?: number | null; // 0-100 within phase
   status:
     | "pending"
     | "processing"
@@ -70,6 +73,8 @@ const jobService = {
       scope: dbJob.payload?.scope,
       createdAt: new Date(dbJob.created_at).getTime(),
       updatedAt: new Date(dbJob.updated_at).getTime(),
+      phase: dbJob.phase ?? null,
+      phaseProgress: dbJob.phase_progress ?? null,
       status: dbJob.status,
       total: dbJob.total,
       completed: dbJob.progress,
@@ -104,6 +109,8 @@ const mapDbJob = (dbJob: any): JobRecord => ({
   scope: dbJob.payload?.scope,
   createdAt: new Date(dbJob.created_at).getTime(),
   updatedAt: new Date(dbJob.updated_at).getTime(),
+  phase: dbJob.phase ?? null,
+  phaseProgress: dbJob.phase_progress ?? null,
   status: dbJob.status,
   total: dbJob.total,
   completed: dbJob.progress,
@@ -115,6 +122,8 @@ const mapDbJob = (dbJob: any): JobRecord => ({
 export const JobCenterProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
+  // NOTE: We removed direct notification context usage here to avoid provider ordering issues.
+  // A separate component can consume JobCenter and Notification contexts together to emit toasts.
   const { data: initial = [], isLoading } = useQuery({
     queryKey: ["jobs"],
     queryFn: jobService.getJobs,
@@ -159,6 +168,8 @@ export const JobCenterProvider: React.FC<{ children: React.ReactNode }> = ({
               ) {
                 next[payload.new.id].createdAt = existing.createdAt;
               }
+              // Emit lifecycle toast if status changed to terminal
+              // Toast emission moved out of provider (see JobLifecycleToasts component)
             } else if (payload.eventType === "DELETE") {
               delete next[payload.old.id];
             }

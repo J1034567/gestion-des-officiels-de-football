@@ -6,8 +6,8 @@
 import React, { useState } from "react";
 import { useNotificationContext } from "../contexts/NotificationContext";
 import { quickJobSystemTest } from "../tests/quick-job-test";
-import { jobService } from "../services/jobService";
 import { JobKinds } from "../supabase/functions/_shared/jobKinds";
+import { useEnqueueWithUX } from "./enqueueWithUX";
 
 interface TestResult {
   testName: string;
@@ -22,13 +22,13 @@ export const JobSystemTestPanel: React.FC = () => {
   const [results, setResults] = useState<TestResult[]>([]);
   const [selectedTest, setSelectedTest] = useState<string>("all");
   const { showNotification } = useNotificationContext();
+  const enqueueWithUX = useEnqueueWithUX();
 
   const tests = {
     all: "Run All Tests",
     jobCreation: "Job Creation",
     jobsTable: "Jobs Table Access",
     processJobsFunction: "Process Jobs Function",
-    jobStats: "Job Statistics",
     bulkPDF: "Bulk PDF Generation",
     bulkEmail: "Bulk Email Sending",
   };
@@ -49,17 +49,12 @@ export const JobSystemTestPanel: React.FC = () => {
         case "processJobsFunction":
           result = await quickJobSystemTest.testProcessJobsFunction();
           break;
-        case "jobStats":
-          result = await quickJobSystemTest.testJobStats();
-          break;
         case "bulkPDF":
           result = await testBulkPDF();
           break;
         case "bulkEmail":
           result = await testBulkEmail();
           break;
-        default:
-          result = await quickJobSystemTest.runAllTests();
       }
 
       return {
@@ -81,9 +76,8 @@ export const JobSystemTestPanel: React.FC = () => {
   };
 
   const testBulkPDF = async () => {
-    const job = await jobService.enqueueJob({
+    const job = await enqueueWithUX({
       type: JobKinds.MissionOrdersBulkPdf,
-      label: "Test Bulk PDF Generation",
       payload: {
         orders: [
           { matchId: "test-match-1", officialId: "test-official-1" },
@@ -91,16 +85,14 @@ export const JobSystemTestPanel: React.FC = () => {
         ],
         fileName: "test-bulk.pdf",
       },
-      total: 2,
+      label: "Test Bulk PDF Generation",
     });
-
     return { jobId: job.id, status: job.status, type: job.type };
   };
 
   const testBulkEmail = async () => {
-    const job = await jobService.enqueueJob({
+    const job = await enqueueWithUX({
       type: JobKinds.MatchSheetsBulkEmail,
-      label: "Test Bulk Email Sending",
       payload: {
         recipients: [
           { email: "test1@example.com", name: "Test User 1" },
@@ -109,10 +101,10 @@ export const JobSystemTestPanel: React.FC = () => {
         subject: "Integration Test Email",
         message: "This is a test email from the job system integration test.",
         test: true,
+        matchIds: ["integration-match-id"],
       },
-      total: 2,
+      label: "Test Bulk Email Sending",
     });
-
     return { jobId: job.id, status: job.status, type: job.type };
   };
 

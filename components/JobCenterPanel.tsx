@@ -132,7 +132,7 @@ export const JobCenterPanel: React.FC<JobCenterPanelProps> = ({ onClose }) => {
             Début
           </SortableHeader>
         </div>
-        <div className="col-span-4">Description</div>
+        <div className="col-span-4">Tâche</div>
         <div className="col-span-3">Progression</div>
         <div className="col-span-2">
           <SortableHeader

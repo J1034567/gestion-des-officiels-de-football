@@ -2,6 +2,7 @@
 import React, { useMemo, useState } from "react";
 import type { JobRecord } from "../hooks/useJobCenter";
 import { STATUS_CONFIG, formatDuration } from "./job-center.config";
+import { JOB_KIND_META, STATUS_DISPLAY } from "./job-kind-meta";
 import { Download, RefreshCw, Trash2 } from "lucide-react";
 
 interface JobRowProps {
@@ -70,32 +71,142 @@ export const JobRow: React.FC<JobRowProps> = React.memo(
             {new Date(job.createdAt).toLocaleTimeString()}
           </div>
 
-          {/* Type & Scope */}
+          {/* Type, Verb & Scope */}
           <div className="col-span-4 flex flex-col gap-1 text-xs truncate">
-            <div className="font-semibold truncate" title={job.label}>
-              {job.label}
-            </div>
+            {(() => {
+              const meta =
+                JOB_KIND_META[job.type as keyof typeof JOB_KIND_META];
+              const baseLabel = meta ? meta.fullLabel : job.label;
+              const progressive = meta?.verbProgressive;
+              const past = meta?.verbPast;
+              let displayLine = baseLabel;
+              if (job.status === "processing" && progressive)
+                displayLine = progressive;
+              else if (job.status === "completed" && past)
+                displayLine =
+                  past +
+                  (job.meta?.generate_stats?.succeeded
+                    ? ` (${job.meta.generate_stats.succeeded})`
+                    : "");
+              return (
+                <div className="font-semibold truncate" title={baseLabel}>
+                  {displayLine}
+                </div>
+              );
+            })()}
             <div
-              className="text-gray-400 truncate"
+              className="text-gray-400 truncate flex items-center gap-2"
               title={job.scope || job.meta?.scope || ""}
             >
-              <span className="inline-block px-2 py-0.5 rounded bg-gray-700 border border-gray-600 text-gray-300 capitalize text-[10px]">
-                {job.type}
+              {(() => {
+                const meta =
+                  JOB_KIND_META[job.type as keyof typeof JOB_KIND_META];
+                return (
+                  <span
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-gray-700 border border-gray-600 text-gray-300 text-[10px]"
+                    title={meta?.fullLabel || job.type}
+                  >
+                    {meta?.icon && (
+                      <span className="shrink-0">{meta.icon}</span>
+                    )}
+                    <span className="truncate max-w-[90px]">
+                      {meta?.shortLabel || job.type}
+                    </span>
+                  </span>
+                );
+              })()}
+              <span className="truncate">
+                {job.scope || job.meta?.scope || ""}
               </span>
-              <span className="ml-2">{job.scope || job.meta?.scope || ""}</span>
             </div>
           </div>
 
-          {/* Progress */}
+          {/* Progress & Phase */}
           <div className="col-span-3 flex flex-col gap-1">
-            <div className="h-2 bg-gray-700 rounded overflow-hidden">
-              <div
-                className={`h-full transition-all duration-300 ease-out ${progressBarColor}`}
-                style={{ width: `${progressPct}%` }}
-              />
-            </div>
-            <div className="text-[10px] text-gray-400 flex justify-between">
+            {(() => {
+              const meta =
+                JOB_KIND_META[job.type as keyof typeof JOB_KIND_META];
+              const phaseLabels = meta?.phaseLabels;
+              const phases = phaseLabels ? Object.keys(phaseLabels) : [];
+              const currentPhase = job.phase || job.meta?.phase || null;
+              const withinPhasePct =
+                job.phaseProgress ?? job.meta?.phase_progress ?? null;
+              if (!phaseLabels || phases.length === 0) {
+                // Fallback single bar
+                return (
+                  <div className="h-2 bg-gray-700 rounded overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-300 ease-out ${progressBarColor}`}
+                      style={{ width: `${progressPct}%` }}
+                    />
+                  </div>
+                );
+              }
+              // Build segments equally spaced unless we later add weights
+              const segmentCount = phases.length;
+              const segmentWidth = 100 / segmentCount;
+              const currentIdx = currentPhase
+                ? phases.indexOf(currentPhase)
+                : -1;
+              return (
+                <div className="flex h-2 w-full overflow-hidden rounded bg-gray-700">
+                  {phases.map((p, idx) => {
+                    const isCompleted =
+                      job.status === "completed" ||
+                      idx < currentIdx ||
+                      (job.status === "processing" && idx < currentIdx);
+                    const isCurrent =
+                      job.status === "processing" && idx === currentIdx;
+                    const baseColor =
+                      job.status === "failed"
+                        ? "bg-red-500/60"
+                        : "bg-blue-500/30";
+                    const fillColor =
+                      job.status === "failed"
+                        ? "bg-red-500"
+                        : job.status === "completed"
+                        ? "bg-green-500"
+                        : "bg-blue-500";
+                    let innerPct = 0;
+                    if (isCompleted) innerPct = 100;
+                    else if (isCurrent && typeof withinPhasePct === "number")
+                      innerPct = Math.min(100, Math.max(0, withinPhasePct));
+                    return (
+                      <div
+                        key={p}
+                        className={`relative ${baseColor}`}
+                        style={{ width: `${segmentWidth}%` }}
+                        title={phaseLabels[p]}
+                      >
+                        <div
+                          className={`h-full transition-all duration-300 ease-out ${
+                            innerPct > 0 ? fillColor : ""
+                          }`}
+                          style={{ width: `${innerPct}%` }}
+                        />
+                        {idx < segmentCount - 1 && (
+                          <div className="absolute top-0 right-0 h-full w-px bg-gray-800/70" />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+            <div className="text-[10px] text-gray-400 flex justify-between items-center">
               <span>{progressPct}%</span>
+              <span className="truncate">
+                {(() => {
+                  const meta =
+                    JOB_KIND_META[job.type as keyof typeof JOB_KIND_META];
+                  if (job.status !== "processing")
+                    return formatDuration(duration);
+                  const phase = job.phase || job.meta?.phase;
+                  if (!meta) return formatDuration(duration);
+                  const label = phase && meta.phaseLabels?.[phase];
+                  return label ? label : formatDuration(duration);
+                })()}
+              </span>
               <span>{formatDuration(duration)}</span>
             </div>
           </div>
