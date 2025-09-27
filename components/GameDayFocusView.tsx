@@ -5,7 +5,6 @@ import React, {
   useCallback,
   useRef,
 } from "react";
-import { useMissionOrderProgress } from "../hooks/useMissionOrderProgress";
 import { useDistance } from "../hooks/useDistance";
 import { computeBufferedDistance } from "../utils/distance";
 import {
@@ -28,17 +27,14 @@ import EnvelopeIcon from "./icons/EnvelopeIcon";
 import QuickEmailModal from "./QuickEmailModal";
 import PaperAirplaneIcon from "./icons/PaperAirplaneIcon";
 import PrinterIcon from "./icons/PrinterIcon";
-import { downloadBlob } from "../services/pdfService";
-import {
-  getBulkMissionOrdersPdf,
-  MissionOrderRequest,
-} from "../services/missionOrderService";
-import { missionOrderBatch } from "../services/missionOrderService";
+// Legacy mission order generation utilities removed in new architecture (handled by backend workers)
+import { MissionOrderRequest } from "../services/missionOrderService"; // Type only
 import AlertModal from "./AlertModal";
 import DownloadIcon from "./icons/DownloadIcon";
 import { exportGameDaySummaryToExcel } from "../services/exportService";
 import LocationPinIcon from "./icons/LocationPinIcon";
 import { useJobCenter } from "../hooks/useJobCenter";
+import { jobService } from "../services/jobService";
 
 // --- UTILS & HOOKS ---
 
@@ -328,9 +324,7 @@ export const GameDayFocusView: React.FC<GameDayFocusViewProps> = ({
   const [sendingMatchIds, setSendingMatchIds] = useState<Set<string>>(
     new Set()
   );
-  const [isBulkSending, setIsBulkSending] = useState(false);
-  const [isPrinting, setIsPrinting] = useState(false);
-  const [printingScope, setPrintingScope] = useState<string | null>(null);
+  // Legacy bulk sending & printing state removed – job realtime data is now the source of truth
   const [isExporting, setIsExporting] = useState(false);
   const [alertInfo, setAlertInfo] = useState<{
     title: string;
@@ -340,37 +334,23 @@ export const GameDayFocusView: React.FC<GameDayFocusViewProps> = ({
     matchId: string;
     role: OfficialRole;
   } | null>(null);
-  const {
-    register: registerJob,
-    update: updateJob,
-    complete: completeJob,
-    fail: failJob,
-    get: getJob,
-  } = useJobCenter();
 
-  // Build a unique job id per print scope so different days (focus views) don't block each other.
-  // For the "all" scope we now also append a normalized date (single date or range) to disambiguate game days that share group/day/season meta but differ by actual calendar dates.
+  const { jobs } = useJobCenter();
   const deriveJobId = useCallback(
-    (scope: string | "all") => {
-      if (scope !== "all") return `mission_orders:${scope}`;
+    (scope: "all" | string, kind: "pdf" | "email") => {
+      const prefix = scope === "all" ? "all" : `match_${scope}`;
       const first = matches[0];
       if (first) {
-        // Collect distinct matchDate values (ignore null/undefined)
-        const dates = Array.from(
-          new Set(
-            matches.map((m) => m.matchDate).filter((d): d is string => !!d)
-          )
-        ).sort();
-        let dateSegment = "nodate";
-        if (dates.length === 1) {
-          dateSegment = dates[0];
-        } else if (dates.length > 1) {
-          // Compress to first+last to keep id manageable
-          dateSegment = `${dates[0]}_${dates[dates.length - 1]}`;
-        }
-        return `mission_orders:all:${first.leagueGroup.id}:${first.gameDay}:${first.season}:${dateSegment}`;
+        const dates = [
+          ...new Set(matches.map((m) => m.matchDate).filter(Boolean)),
+        ].sort();
+        const dateSegment =
+          dates.length > 1
+            ? `${dates[0]}_${dates[dates.length - 1]}`
+            : dates[0] || "nodate";
+        return `mission_orders:${prefix}:${first.leagueGroup.id}:${first.gameDay}:${dateSegment}:${kind}`;
       }
-      return `mission_orders:all:${Date.now()}`; // fallback (should rarely happen)
+      return `mission_orders:${prefix}:${Date.now()}:${kind}`;
     },
     [matches]
   );
@@ -545,180 +525,15 @@ export const GameDayFocusView: React.FC<GameDayFocusViewProps> = ({
     }
   }, [matches, pendingDrop, onUpdateAssignment]);
 
-  // Per-scope ("all" or match.id) generation progress
-  const {
-    progressMap: printProgressMap,
-    initScope,
-    setProgress,
-    clearScope,
-  } = useMissionOrderProgress();
-
-  // Persist printing meta (scope & flag) so UI restores correctly after navigation / tab switch
-  const PRINT_META_KEY = "missionOrderPrintingMeta";
-  interface PrintingMetaV2 {
-    version: 2;
-    scope: string; // 'all' or matchId
-    startedAt: number;
-    fileName: string;
-    total?: number; // total orders expected
-    completed?: number; // last known completed count
-    batchHash?: string; // idempotent job hash (if server batch path used)
-    mode?: "job" | "server-bulk" | "client";
-  }
-  // Rehydrate printing state on mount
-  useEffect(() => {
-    try {
-      const raw = sessionStorage.getItem(PRINT_META_KEY);
-      if (raw) {
-        try {
-          const meta = JSON.parse(raw) as PrintingMetaV2 | null;
-          if (meta && meta.scope) {
-            // If progress persisted, restore spinner; further resume logic (poll) handled in separate effect once we add job hash support
-            if (printProgressMap[meta.scope]) {
-              setPrintingScope(meta.scope);
-              setIsPrinting(true);
-            } else if (meta.batchHash) {
-              // We'll attempt a resume by polling job status even if local progress entry expired (added in later effect)
-              setPrintingScope(meta.scope);
-              setIsPrinting(true);
-            } else {
-              // No progress & no hash -> clear
-              sessionStorage.removeItem(PRINT_META_KEY);
-            }
-          }
-        } catch {
-          sessionStorage.removeItem(PRINT_META_KEY);
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-    // Only run on first mount; eslint can ignore deps
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Helper to persist current printing scope
-  const persistPrintingMeta = useCallback((meta: PrintingMetaV2) => {
-    try {
-      sessionStorage.setItem(PRINT_META_KEY, JSON.stringify(meta));
-    } catch {
-      /* ignore */
-    }
-  }, []);
-  const clearPrintingMeta = useCallback(() => {
-    try {
-      sessionStorage.removeItem(PRINT_META_KEY);
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  // Resume polling for a server batch job if we have a stored hash but no local progress (e.g., after reload)
-  useEffect(() => {
-    let cancelled = false;
-    const resume = async () => {
-      try {
-        const raw = sessionStorage.getItem(PRINT_META_KEY);
-        if (!raw) return;
-        const meta = JSON.parse(raw) as PrintingMetaV2 | null;
-        if (!meta || !meta.batchHash) return;
-        // If already completed previously, bail
-        const elapsed = Date.now() - meta.startedAt;
-        const MAX_WINDOW_MS = 90_000; // allow longer than initial 60s to finish
-        if (elapsed > MAX_WINDOW_MS) {
-          // Stale job window -> cleanup
-          clearPrintingMeta();
-          setIsPrinting(false);
-          setPrintingScope(null);
-          return;
-        }
-        setIsPrinting(true);
-        setPrintingScope(meta.scope);
-        // Poll with backoff-ish fixed delay
-        let firstAttempt = true;
-        while (!cancelled) {
-          let job;
-          try {
-            job = await missionOrderBatch.get(meta.batchHash);
-          } catch (err: any) {
-            if (firstAttempt) {
-              setAlertInfo({
-                title: "Reprise Impossible",
-                message:
-                  "Le suivi du lot a échoué (fonction indisponible ou payload invalide). Veuillez relancer.",
-              });
-              break; // abort loop; will cleanup below
-            }
-            console.warn("Polling error (will retry)", err);
-            await new Promise((r) => setTimeout(r, 2000));
-            continue;
-          }
-          firstAttempt = false;
-          if (job.status === "completed" && job.artifactUrl) {
-            const resp = await fetch(job.artifactUrl);
-            if (resp.ok) {
-              const blob = await resp.blob();
-              if (!cancelled) {
-                downloadBlob(blob, meta.fileName || "Ordres_de_Mission.pdf");
-              }
-            }
-            break;
-          }
-          if (job.status === "failed") {
-            setAlertInfo({
-              title: "Génération Echouée",
-              message:
-                job.error || "La génération du lot a échoué côté serveur.",
-            });
-            break;
-          }
-          if (Date.now() - meta.startedAt > MAX_WINDOW_MS) {
-            setAlertInfo({
-              title: "Expiration",
-              message: "La génération a pris trop de temps. Veuillez relancer.",
-            });
-            break;
-          }
-          await new Promise((r) => setTimeout(r, 1500));
-        }
-      } catch (err) {
-        console.warn("Resume polling failed", err);
-      } finally {
-        if (!cancelled) {
-          setIsPrinting(false);
-          setPrintingScope(null);
-          // We always cleanup meta after resume attempt (success or failure) to avoid zombie spinners
-          clearPrintingMeta();
-        }
-      }
-    };
-    // Only attempt resume if not currently printing (fresh session) and no local progress entry retained
-    if (!isPrinting) {
-      resume();
-    }
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
   const handlePrintOrders = useCallback(
-    async (scope: "all" | string, options?: { force?: boolean }) => {
-      // Use derived job id (ensures uniqueness across different game days for 'all')
-      const derivedId = deriveJobId(scope);
-      const existing = getJob(derivedId);
-      if (
-        !options?.force &&
-        existing &&
-        ["pending", "processing"].includes(existing.status)
-      ) {
+    async (scope: "all" | string) => {
+      const derivedId = deriveJobId(scope, "pdf");
+      const existing = jobs.find((j) => j.meta?.derivedId === derivedId);
+      if (existing && ["pending", "processing"].includes(existing.status))
         return;
-      }
-      // We still initialize legacy progress map for backward compatibility, but UI no longer shows it.
-      // Initialize scope progress (will get real numbers from callback soon)
-      initScope(scope);
+
       const ordersToGenerate: MissionOrderRequest[] = [];
       let fileName = "Ordres_de_Mission.pdf";
-
       if (scope === "all") {
         fileName = `Ordres_de_Mission_${headerInfo.sub.replace(
           /\s/g,
@@ -746,146 +561,36 @@ export const GameDayFocusView: React.FC<GameDayFocusViewProps> = ({
           }
         }
       }
-
       if (ordersToGenerate.length === 0) {
         setAlertInfo({
           title: "Aucun Ordre à Générer",
           message: "Aucun officiel n'est assigné pour la sélection choisie.",
         });
-        setIsPrinting(false);
-        setPrintingScope(null);
         return;
       }
       try {
-        let batchHashCaptured: string | undefined;
-        persistPrintingMeta({
-          version: 2,
-          scope,
-          startedAt: Date.now(),
-          fileName,
+        await jobService.enqueueJob({
+          type: "mission_orders.bulk_pdf",
+          label:
+            scope === "all"
+              ? `PDFs Journée: ${headerInfo.sub}`
+              : fileName.replace(/\.pdf$/i, ""),
           total: ordersToGenerate.length,
-          completed: 0,
-        });
-        // Register job in job center using derived job id so that day/game-scoped uniqueness matches UI disable logic.
-        const baseJobId = derivedId; // already computed above
-        // Derive label: all, single match, or game day scope
-        let jobLabel: string;
-        if (scope === "all") jobLabel = "Tous les matchs";
-        else if (matches.some((m) => m.id === scope))
-          jobLabel = fileName.replace(/\.pdf$/i, "");
-        else jobLabel = `Jeu ${scope}`; // scope is a game day number / code
-        // If forcing reprint while a completed job exists, create a new unique id by suffixing timestamp
-        const effectiveJobId =
-          existing && options?.force && existing.status === "completed"
-            ? `${baseJobId}:reprint:${Date.now()}`
-            : baseJobId;
-        registerJob({
-          id: effectiveJobId,
-          type: "mission_orders",
-          label: jobLabel,
-          total: ordersToGenerate.length,
-          completed: 0,
-          scope: scope === "all" ? headerInfo.sub : scope,
-          // Store full orders payload for orchestrated retry
-          meta: { scope, fileName, orders: ordersToGenerate },
-          artifactUrl: undefined,
-        });
-        const pdfBlob = await getBulkMissionOrdersPdf(
-          ordersToGenerate,
-          (p) => {
-            setProgress(scope, p.total, p.completed);
-            updateJob(existing && options?.force ? effectiveJobId : baseJobId, {
-              total: p.total,
-              completed: p.completed,
-              status:
-                p.completed < p.total
-                  ? "processing"
-                  : p.completed === p.total
-                  ? "completed"
-                  : undefined,
-            });
-            // Update persisted meta incremental counts
-            try {
-              const raw = sessionStorage.getItem(PRINT_META_KEY);
-              if (raw) {
-                const meta = JSON.parse(raw) as PrintingMetaV2;
-                if (meta && meta.scope === scope) {
-                  meta.completed = p.completed;
-                  meta.total = p.total;
-                  if (batchHashCaptured) meta.batchHash = batchHashCaptured;
-                  sessionStorage.setItem(PRINT_META_KEY, JSON.stringify(meta));
-                }
-              }
-            } catch {
-              /* ignore */
-            }
+          payload: {
+            orders: ordersToGenerate,
+            fileName,
+            derivedId,
+            scope,
           },
-          {
-            onJobHash: (hash) => {
-              batchHashCaptured = hash;
-              try {
-                const raw = sessionStorage.getItem(PRINT_META_KEY);
-                if (raw) {
-                  const meta = JSON.parse(raw) as PrintingMetaV2;
-                  if (meta && meta.scope === scope) {
-                    meta.batchHash = hash;
-                    meta.mode = "job";
-                    sessionStorage.setItem(
-                      PRINT_META_KEY,
-                      JSON.stringify(meta)
-                    );
-                  }
-                }
-              } catch {
-                /* ignore */
-              }
-            },
-          }
-        );
-        if (pdfBlob) {
-          downloadBlob(pdfBlob, fileName);
-          completeJob(existing && options?.force ? effectiveJobId : baseJobId, {
-            completed: ordersToGenerate.length,
-          });
-        } else {
-          failJob(
-            existing && options?.force ? effectiveJobId : baseJobId,
-            "Le fichier PDF généré est vide."
-          );
-          throw new Error("Le fichier PDF généré est vide.");
-        }
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error
-            ? error.message
-            : "Une erreur inconnue est survenue.";
-        setAlertInfo({
-          title: "Erreur de Génération",
-          message: `Impossible de générer le PDF. Détails: ${errorMessage}`,
         });
-        try {
-          failJob(
-            existing && options?.force ? existing.id : deriveJobId(scope),
-            (error as any)?.message || "Erreur"
-          );
-        } catch {
-          /* ignore */
-        }
+      } catch (error: any) {
+        setAlertInfo({
+          title: "Erreur de Lancement",
+          message: error.message || "Impossible de démarrer la tâche.",
+        });
       }
-      // Local button no longer shows spinner; rely on Job Center
-      // Remove the scope progress entry after completion (slight delay for UX?)
-      setTimeout(() => clearScope(scope), 400);
-      clearPrintingMeta();
     },
-    [
-      matches,
-      headerInfo.sub,
-      initScope,
-      setProgress,
-      clearScope,
-      persistPrintingMeta,
-      clearPrintingMeta,
-    ]
+    [matches, headerInfo.sub, jobs, deriveJobId]
   );
 
   const handleExportSummary = useCallback(() => {
@@ -1062,56 +767,29 @@ export const GameDayFocusView: React.FC<GameDayFocusViewProps> = ({
 
   const handleBulkSend = useCallback(async () => {
     if (eligibleMatchIds.length === 0) return;
-    setIsBulkSending(true);
-    const jobId = `emails:bulk:${headerInfo.sub || "scope"}`;
-    registerJob({
-      id: jobId,
-      type: "emails",
-      label: `Envoi feuilles (${eligibleMatchIds.length})`,
-      total: eligibleMatchIds.length,
-      completed: 0,
-      meta: { scope: headerInfo.sub, matchIds: eligibleMatchIds },
-    });
-    setSendingMatchIds((prev) => new Set([...prev, ...eligibleMatchIds]));
-    let completedCount = 0;
+    const derivedId = deriveJobId("all", "email");
+    const existing = jobs.find(
+      (j) => j.meta?.derivedId === derivedId && j.type.includes("email")
+    );
+    if (existing && ["pending", "processing"].includes(existing.status)) return;
     try {
-      for (const id of eligibleMatchIds) {
-        try {
-          await onSendMatchSheet(id);
-        } catch (e) {
-          // don't break the whole batch; log per-match failure
-          console.error("Bulk email send failure for match", id, e);
-        }
-        completedCount += 1;
-        updateJob(jobId, {
-          completed: completedCount,
-          total: eligibleMatchIds.length,
-          status:
-            completedCount < eligibleMatchIds.length
-              ? "processing"
-              : "completed",
-        });
-      }
-      completeJob(jobId, { completed: completedCount });
-    } catch (e) {
-      failJob(jobId, (e as any)?.message || "Erreur envoi");
-    } finally {
-      setIsBulkSending(false);
-      setSendingMatchIds((prev) => {
-        const newSet = new Set(prev);
-        eligibleMatchIds.forEach((id) => newSet.delete(id));
-        return newSet;
+      await jobService.enqueueJob({
+        type: "mission_orders.email_bulk",
+        label: `Envoi feuilles (${eligibleMatchIds.length})`,
+        total: eligibleMatchIds.length,
+        payload: {
+          matchIds: eligibleMatchIds,
+          scope: headerInfo.sub,
+          derivedId,
+        },
+      });
+    } catch (e: any) {
+      setAlertInfo({
+        title: "Erreur de Lancement",
+        message: e.message || "Impossible de démarrer l'envoi.",
       });
     }
-  }, [
-    eligibleMatchIds,
-    onSendMatchSheet,
-    registerJob,
-    updateJob,
-    completeJob,
-    failJob,
-    headerInfo.sub,
-  ]);
+  }, [eligibleMatchIds, headerInfo.sub, deriveJobId, jobs]);
 
   const handleAddSlot = useCallback(
     async (matchId: string, role: OfficialRole) => {
@@ -1201,11 +879,15 @@ export const GameDayFocusView: React.FC<GameDayFocusViewProps> = ({
                 <button
                   onClick={() => handlePrintOrders("all")}
                   disabled={(() => {
-                    const j = getJob(deriveJobId("all"));
+                    const j = jobs.find(
+                      (j) => j.meta?.derivedId === deriveJobId("all", "pdf")
+                    );
                     return !!j && ["pending", "processing"].includes(j.status);
                   })()}
                   title={(() => {
-                    const j = getJob(deriveJobId("all"));
+                    const j = jobs.find(
+                      (j) => j.meta?.derivedId === deriveJobId("all", "pdf")
+                    );
                     return j && ["pending", "processing"].includes(j.status)
                       ? "En cours - voir Centre des tâches"
                       : "Imprimer tous les ordres de mission";
@@ -1214,9 +896,13 @@ export const GameDayFocusView: React.FC<GameDayFocusViewProps> = ({
                 >
                   <PrinterIcon className="h-5 w-5 mr-2" />
                   {(() => {
-                    const j = getJob(deriveJobId("all"));
+                    const j = jobs.find(
+                      (j) => j.meta?.derivedId === deriveJobId("all", "pdf")
+                    );
                     return j && ["pending", "processing"].includes(j.status)
-                      ? "En cours…"
+                      ? j.status === "processing" && j.total
+                        ? `En cours… (${j.completed}/${j.total})`
+                        : "En attente…"
                       : "Imprimer Ordres";
                   })()}
                 </button>
@@ -1225,36 +911,29 @@ export const GameDayFocusView: React.FC<GameDayFocusViewProps> = ({
               {permissions.can("send", "match_sheet") && (
                 <button
                   onClick={handleBulkSend}
-                  disabled={eligibleMatchIds.length === 0 || isBulkSending}
+                  disabled={
+                    eligibleMatchIds.length === 0 ||
+                    (() => {
+                      const j = jobs.find(
+                        (j) => j.meta?.derivedId === deriveJobId("all", "email")
+                      );
+                      return j && ["pending", "processing"].includes(j.status);
+                    })()
+                  }
                   className="inline-flex items-center justify-center bg-blue-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors"
                 >
-                  {isBulkSending ? (
-                    <svg
-                      className="animate-spin -ml-1 mr-3 h-5 w-5"
-                      xmlns="http://www.w3.org/2000/svg"
-                      fill="none"
-                      viewBox="0 0 24 24"
-                    >
-                      <circle
-                        cx="12"
-                        cy="12"
-                        r="10"
-                        stroke="currentColor"
-                        strokeWidth="4"
-                        opacity="0.25"
-                      ></circle>
-                      <path
-                        fill="currentColor"
-                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                        opacity="0.75"
-                      ></path>
-                    </svg>
-                  ) : (
-                    <PaperAirplaneIcon className="h-5 w-5 mr-2" />
-                  )}
-                  {isBulkSending
-                    ? "Envoi..."
-                    : `Envoyer ${eligibleMatchIds.length} Feuilles`}
+                  <PaperAirplaneIcon className="h-5 w-5 mr-2" />
+                  {(() => {
+                    const j = jobs.find(
+                      (j) => j.meta?.derivedId === deriveJobId("all", "email")
+                    );
+                    if (j && ["pending", "processing"].includes(j.status)) {
+                      return j.status === "processing" && j.total
+                        ? `Envoi... (${j.completed}/${j.total})`
+                        : "Mise en file...";
+                    }
+                    return `Envoyer ${eligibleMatchIds.length} Feuilles`;
+                  })()}
                 </button>
               )}
             </div>
@@ -1546,7 +1225,11 @@ export const GameDayFocusView: React.FC<GameDayFocusViewProps> = ({
                                       (a) => !a.officialId
                                     ) ||
                                     (() => {
-                                      const j = getJob(deriveJobId(match.id));
+                                      const j = jobs.find(
+                                        (j) =>
+                                          j.meta?.derivedId ===
+                                          deriveJobId(match.id, "pdf")
+                                      );
                                       return (
                                         j &&
                                         ["pending", "processing"].includes(
@@ -1561,8 +1244,10 @@ export const GameDayFocusView: React.FC<GameDayFocusViewProps> = ({
                                     )
                                       ? "Aucun officiel désigné"
                                       : (() => {
-                                          const j = getJob(
-                                            deriveJobId(match.id)
+                                          const j = jobs.find(
+                                            (j) =>
+                                              j.meta?.derivedId ===
+                                              deriveJobId(match.id, "pdf")
                                           );
                                           return j &&
                                             ["pending", "processing"].includes(
@@ -1576,12 +1261,18 @@ export const GameDayFocusView: React.FC<GameDayFocusViewProps> = ({
                                 >
                                   <PrinterIcon className="h-4 w-4 mr-1.5" />
                                   {(() => {
-                                    const j = getJob(deriveJobId(match.id));
+                                    const j = jobs.find(
+                                      (j) =>
+                                        j.meta?.derivedId ===
+                                        deriveJobId(match.id, "pdf")
+                                    );
                                     return j &&
                                       ["pending", "processing"].includes(
                                         j.status
                                       )
-                                      ? "En cours…"
+                                      ? j.status === "processing" && j.total
+                                        ? `En cours… (${j.completed}/${j.total})`
+                                        : "En attente…"
                                       : "Imprimer";
                                   })()}
                                 </button>
