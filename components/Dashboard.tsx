@@ -1,4 +1,10 @@
-import React, { useState, useCallback, useMemo, useEffect } from "react";
+import React, {
+  useState,
+  useCallback,
+  useMemo,
+  useEffect,
+  useRef,
+} from "react";
 import {
   Match,
   Official,
@@ -182,6 +188,13 @@ interface MainContentProps {
   handleOpenAssignmentsModal: (match: Match) => void;
   handleOpenQuickDateTimeModal: (match: Match) => void;
   dashboardProps: DashboardProps;
+  /**
+   * When returning to the planning list view we restore the previous scroll position
+   * instead of auto-scrolling to today. If null, we auto-scroll as before.
+   */
+  initialListScroll: number | null;
+  /** Persist the latest scroll position when unmounting / navigating away */
+  onPersistListScroll: (y: number | null) => void;
 }
 
 const MainContent: React.FC<MainContentProps> = ({
@@ -212,6 +225,8 @@ const MainContent: React.FC<MainContentProps> = ({
   handleOpenAssignmentsModal,
   handleOpenQuickDateTimeModal,
   dashboardProps,
+  initialListScroll,
+  onPersistListScroll,
 }) => {
   const [contentView, setContentView] = useState<"card" | "list">("list");
 
@@ -274,6 +289,82 @@ const MainContent: React.FC<MainContentProps> = ({
       return new Date(a).getTime() - new Date(b).getTime();
     });
   }, [matchesByDay]);
+
+  // Sticky header total height offset (nav tabs + internal toolbar)
+  const SCROLL_HEADER_OFFSET = 160; // was 140, adjusted for better alignment
+
+  // Helper to scroll to today's row (reused by effect + manual button)
+  const scrollToToday = useCallback((opts?: { highlight?: boolean }) => {
+    try {
+      const now = new Date();
+      // Build local date string to avoid UTC shifting (was causing previous-day scroll)
+      const y = now.getFullYear();
+      const m = String(now.getMonth() + 1).padStart(2, "0");
+      const d = String(now.getDate()).padStart(2, "0");
+      const localKey = `${y}-${m}-${d}`;
+      const target = document.querySelector(`tr[data-day-row='${localKey}']`);
+      if (target) {
+        const top =
+          (target as HTMLElement).getBoundingClientRect().top +
+          window.scrollY -
+          SCROLL_HEADER_OFFSET;
+        window.scrollTo({ top, behavior: "smooth" });
+        if (opts?.highlight) {
+          const el = target as HTMLElement;
+          el.classList.add(
+            "ring-2",
+            "ring-brand-primary",
+            "ring-offset-2",
+            "ring-offset-gray-800"
+          );
+          setTimeout(() => {
+            el.classList.remove(
+              "ring-2",
+              "ring-brand-primary",
+              "ring-offset-2",
+              "ring-offset-gray-800"
+            );
+          }, 1600);
+        }
+      }
+    } catch (_) {}
+  }, []);
+
+  // Restore previous scroll position (if any) otherwise auto-scroll to today
+  useEffect(() => {
+    if (contentView !== "list") return;
+    if (!displayMatches || displayMatches.length === 0) return;
+    // If we have a stored position, restore it once
+    if (initialListScroll != null) {
+      const handle = requestAnimationFrame(() => {
+        window.scrollTo({ top: initialListScroll });
+      });
+      return () => cancelAnimationFrame(handle);
+    }
+    // Fallback to legacy behavior: scroll to today
+    const handle = requestAnimationFrame(() => scrollToToday());
+    return () => cancelAnimationFrame(handle);
+  }, [contentView, displayMatches, scrollToToday, initialListScroll]);
+
+  // Track latest scroll position while in list view
+  const latestScrollRef = useRef<number>(0);
+  useEffect(() => {
+    if (contentView !== "list") return;
+    const onScroll = () => {
+      latestScrollRef.current = window.scrollY;
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, [contentView]);
+
+  // Persist scroll position when MainContent unmounts (or dependencies change triggering unmount)
+  useEffect(() => {
+    return () => {
+      try {
+        onPersistListScroll(latestScrollRef.current);
+      } catch (_) {}
+    };
+  }, [onPersistListScroll]);
 
   const matchStatusColors: {
     [key in MatchStatus]: { bg: string; text: string };
@@ -568,6 +659,15 @@ const MainContent: React.FC<MainContentProps> = ({
             >
               <ListBulletIcon className="h-5 w-5" />
             </button>
+            {contentView === "list" && (
+              <button
+                onClick={() => scrollToToday({ highlight: true })}
+                className="ml-2 px-2 py-1.5 text-xs font-semibold rounded-md flex items-center bg-gray-600 text-gray-200 hover:bg-brand-primary/30 hover:text-white transition-colors"
+                title="Recentrer sur aujourd'hui"
+              >
+                Aujourd'hui
+              </button>
+            )}
           </div>
           {permissions.can("create", "match") && (
             <button
@@ -758,7 +858,10 @@ const MainContent: React.FC<MainContentProps> = ({
 
                   return (
                     <tbody key={day} className="border-t-4 border-gray-900">
-                      <tr className="bg-gray-700/40">
+                      <tr
+                        className="bg-gray-700/40"
+                        data-day-row={day !== "Unscheduled" ? day : undefined}
+                      >
                         <td colSpan={10} className="px-4 py-2">
                           <div className="flex justify-between items-center">
                             <h3 className="text-md font-bold text-white">
@@ -1393,6 +1496,10 @@ const Dashboard: React.FC<DashboardProps> = (props) => {
 
   const [appliedFilters, setAppliedFilters] = useState<Filters>(initialFilters);
   const [activeView, setActiveView] = useState<ActiveView>({ type: "week" });
+  // Persist planning list scroll position when navigating away
+  const [savedPlanningListScroll, setSavedPlanningListScroll] = useState<
+    number | null
+  >(null);
   const [expandedLeaguesNav, setExpandedLeaguesNav] = useState<
     Record<string, boolean>
   >({});
@@ -1423,31 +1530,20 @@ const Dashboard: React.FC<DashboardProps> = (props) => {
   }, [appliedFilters]);
 
   const smartSummary = useMemo(() => {
-    // We only care about scheduled matches that have assignment slots.
     const relevantMatches = matches.filter(
       (m) =>
         m.status === MatchStatus.SCHEDULED &&
         m.assignments.length > 0 &&
         !m.isArchived
     );
-
     let notStarted = 0;
     let inProgress = 0;
-
     relevantMatches.forEach((m) => {
       const assignedCount = m.assignments.filter((a) => a.officialId).length;
-      const totalSlots = m.assignments.length;
-
-      if (assignedCount === 0) {
-        notStarted++;
-      } else if (assignedCount < totalSlots) {
-        inProgress++;
-      }
+      if (assignedCount === 0) notStarted++;
+      else if (assignedCount < m.assignments.length) inProgress++;
     });
-
-    const unsent = matches.filter(
-      (m) => m.hasUnsentChanges && !m.isArchived
-    ).length;
+    const unsent = matches.filter((m) => m.hasUnsentChanges && !m.isArchived);
     return { notStarted, inProgress, unsent };
   }, [matches]);
 
@@ -1507,11 +1603,11 @@ const Dashboard: React.FC<DashboardProps> = (props) => {
         return false;
       if (stadiumId !== "all" && match.stadium?.id !== stadiumId) return false;
       if (searchTerm) {
-        const normalize = (str: string | null | undefined): string =>
+        const normalize = (str: string | null | undefined) =>
           (str || "")
             .toLowerCase()
             .normalize("NFD")
-            .replace(/[\u0300-\u036f]/g, "");
+            .replace(/\p{Diacritic}/gu, "");
         const searchKeywords = normalize(searchTerm).split(" ").filter(Boolean);
         const searchableText = [
           normalize(match.homeTeam.name),
@@ -1521,9 +1617,7 @@ const Dashboard: React.FC<DashboardProps> = (props) => {
           normalize(match.stadium?.name),
           normalize(match.stadium?.nameAr),
         ].join(" ");
-        if (
-          !searchKeywords.every((keyword) => searchableText.includes(keyword))
-        )
+        if (!searchKeywords.every((k) => searchableText.includes(k)))
           return false;
       }
       return true;
@@ -2272,7 +2366,7 @@ const Dashboard: React.FC<DashboardProps> = (props) => {
                           Non notifiés
                         </span>
                         <span className="font-bold text-lg text-red-400">
-                          {smartSummary.unsent}
+                          {smartSummary.unsent.length}
                         </span>
                       </div>
                     </div>
@@ -2597,6 +2691,8 @@ const Dashboard: React.FC<DashboardProps> = (props) => {
               handleOpenAssignmentsModal={handleOpenAssignmentsModal}
               handleOpenQuickDateTimeModal={handleOpenQuickDateTimeModal}
               dashboardProps={props}
+              initialListScroll={savedPlanningListScroll}
+              onPersistListScroll={(y) => setSavedPlanningListScroll(y)}
             />
           </main>
         </div>
@@ -2622,6 +2718,7 @@ const Dashboard: React.FC<DashboardProps> = (props) => {
                   {option.label}
                 </button>
               ))}
+              {/* Aujourd'hui button moved into MainContent toolbar */}
             </div>
           </div>
         </div>
@@ -2630,10 +2727,11 @@ const Dashboard: React.FC<DashboardProps> = (props) => {
     );
   }
 
+  // (Removed duplicated misplaced auto-scroll effect - logic resides in MainContent now)
+
   return (
     <>
       {currentViewComponent}
-
       {/* Modals */}
       <AssignmentModal
         isOpen={modalState.view === "selection"}
