@@ -2042,8 +2042,8 @@ const Dashboard: React.FC<DashboardProps> = (props) => {
 
   const handleSaveQuickDateTime = (
     matchId: string,
-    date: string,
-    time: string
+    date: string | null,
+    time: string | null
   ) => {
     const matchToUpdate = props.matches.find((m) => m.id === matchId);
 
