@@ -748,7 +748,7 @@ const MainContent: React.FC<MainContentProps> = ({
       {contentView === "list" &&
         (displayMatches.length > 0 ? (
           <div className="bg-gray-800 rounded-lg shadow-md overflow-hidden">
-            <div className="overflow-x-auto">
+            <div className="overflow-auto h-[calc(100vh-240px)]">
               <table className="min-w-full">
                 <thead className="bg-gray-700">
                   <tr>
@@ -859,7 +859,7 @@ const MainContent: React.FC<MainContentProps> = ({
                   return (
                     <tbody key={day} className="border-t-4 border-gray-900">
                       <tr
-                        className="bg-gray-700/40"
+                        className="sticky top-0 z-20 bg-gray-700"
                         data-day-row={day !== "Unscheduled" ? day : undefined}
                       >
                         <td colSpan={10} className="px-4 py-2">
@@ -885,7 +885,7 @@ const MainContent: React.FC<MainContentProps> = ({
                         const groupData = matchesByGroup[groupId];
                         return (
                           <React.Fragment key={groupId}>
-                            <tr className="bg-gray-700/20">
+                            <tr className="sticky top-[44px] z-20 bg-gray-800">
                               <td
                                 colSpan={10}
                                 className="px-6 py-1.5 text-sm font-semibold text-brand-primary"
