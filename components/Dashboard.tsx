@@ -315,7 +315,7 @@ const MainContent: React.FC<MainContentProps> = ({
 
         if (!target) {
           const validDayKeys = sortedDays.filter((k) => k !== "Unscheduled");
-            const todayDate = new Date(`${localKey}T00:00:00`);
+          const todayDate = new Date(`${localKey}T00:00:00`);
           let futureCandidate: string | undefined = validDayKeys.find(
             (k) => new Date(`${k}T00:00:00`) >= todayDate
           );
